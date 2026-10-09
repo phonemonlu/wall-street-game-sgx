@@ -1,7 +1,7 @@
 import pytest
 
 from wallstreet.errors import NotReady
-from wallstreet.scoring import BONUS_ROUNDS, PAYOFF, SEATS, Card, multiplier, score_round
+from wallstreet.scoring import BONUS_ROUNDS, PAYOFF, SEATS, Card, multiplier, player_label, score_round
 
 X, Y = Card.X, Card.Y
 
@@ -68,3 +68,10 @@ def test_seat_order_does_not_matter():
 def test_requires_exactly_the_seats(bad):
     with pytest.raises(NotReady):
         score_round(bad, 1)
+
+
+def test_player_labels_number_seats_across_groups():
+    assert [player_label(1, seat) for seat in SEATS] == ["P1", "P2", "P3", "P4"]
+    assert [player_label(2, seat) for seat in SEATS] == ["P5", "P6", "P7", "P8"]
+    assert [player_label(3, seat) for seat in SEATS] == ["P9", "P10", "P11", "P12"]
+    assert player_label(50, "P4") == "P200"

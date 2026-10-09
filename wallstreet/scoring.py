@@ -25,6 +25,14 @@ PAYOFF: dict[int, tuple[int | None, int | None]] = {
 BONUS_ROUNDS: dict[int, int] = {5: 3, 8: 5, 10: 10}
 
 
+def player_label(group_id: int, seat: str) -> str:
+    """A seat as players see it, numbered across groups: Group 1 is P1-P4, Group 2 is P5-P8, ...
+
+    Inside a group the rules and bots keep using ``SEATS`` (P1-P4); this is for display only.
+    """
+    return f"P{(group_id - 1) * len(SEATS) + SEATS.index(seat) + 1}"
+
+
 def multiplier(round_no: int) -> int:
     return BONUS_ROUNDS.get(round_no, 1)
 

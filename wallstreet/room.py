@@ -22,7 +22,7 @@ from wallstreet.errors import (
     UnknownSeat,
 )
 from wallstreet.game import Game, Phase, RoundRecord
-from wallstreet.scoring import SEATS, Card, multiplier
+from wallstreet.scoring import SEATS, Card, multiplier, player_label
 from wallstreet.strategies import STRATEGIES, SmartBot, Strategy, smart_choices
 
 MAX_GROUPS = 200
@@ -435,7 +435,7 @@ class RoomRegistry:
             {
                 "rank": 0,
                 "group": snap.group_id,
-                "seat": seat.label,
+                "seat": player_label(snap.group_id, seat.label),
                 "name": seat.name,
                 "bot": seat.is_bot,
                 "points": snap.totals[seat.label],
@@ -457,19 +457,20 @@ class RoomRegistry:
 
 
 def _export_group(snap: RoomSnapshot) -> dict:
+    gid = snap.group_id
     return {
         "group": snap.group_id,
         "phase": str(snap.phase),
         "group_total": snap.group_total,
         "seats": [
-            {"seat": s.label, "name": s.name, "bot": s.is_bot, "total": snap.totals[s.label]}
+            {"seat": player_label(gid, s.label), "name": s.name, "bot": s.is_bot, "total": snap.totals[s.label]}
             for s in snap.seats
         ],
         "rounds": [
             {
                 "round": r.round_no,
-                "choices": {seat: str(card) for seat, card in r.choices.items()},
-                "payoffs": dict(r.payoffs),
+                "choices": {player_label(gid, seat): str(card) for seat, card in r.choices.items()},
+                "payoffs": {player_label(gid, seat): points for seat, points in r.payoffs.items()},
                 "multiplier": r.multiplier,
                 "group_total": r.group_total,
             }

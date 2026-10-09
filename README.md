@@ -81,7 +81,8 @@ link on your phone), where you enter your name. Play from that tab; run the game
 ### Running a session
 
 1. Host: open **Setup**, choose the number of groups (1–50) and click **Create groups**.
-2. Players tap a free seat, which is theirs at once, then enter their name. They can change the
+2. Players tap a free seat, which is theirs at once, then enter their name. Seats are numbered
+   across groups: Group 1 is P1–P4, Group 2 is P5–P8, Group 3 is P9–P12, and so on. They can change the
    name (or, before naming, pick another seat) until the game starts. The host can fill empty
    seats with bots.
 3. Host: **Start** each group, or **Start all**. In every round, **Reveal** becomes available once

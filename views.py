@@ -20,7 +20,7 @@ from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
 from wallstreet.room import RoomRegistry, RoomSnapshot, SeatView
-from wallstreet.scoring import SEATS, Card
+from wallstreet.scoring import SEATS, Card, player_label
 from wallstreet.strategies import STRATEGIES
 
 TITLE = "Wall Street Game"
@@ -68,21 +68,25 @@ _BONUS_ROW_STYLE = "background-color: rgba(255, 170, 0, 0.10)"
 
 
 def results_frame(snapshot: RoomSnapshot) -> pd.DataFrame:
-    """One row per *revealed* round: ``RD | Total | P1..P4`` with cells like ``"X +10"``."""
+    """One row per *revealed* round: ``RD | Total | P1..P4`` with cells like ``"X +10"``.
+
+    Seat columns use the players' numbers across groups (Group 2: ``P5..P8``).
+    """
+    labels = {seat: player_label(snapshot.group_id, seat) for seat in SEATS}
     rows = [
         {
             "RD": record.round_no,
             "Total": record.group_total,
-            **{seat: f"{record.choices[seat]} {record.payoffs[seat]:+d}" for seat in SEATS},
+            **{label: f"{record.choices[seat]} {record.payoffs[seat]:+d}" for seat, label in labels.items()},
         }
         for record in snapshot.history
     ]
-    return pd.DataFrame(rows, columns=["RD", "Total", *SEATS])
+    return pd.DataFrame(rows, columns=["RD", "Total", *labels.values()])
 
 
 def totals_line(snapshot: RoomSnapshot) -> str:
     """``"P1: 270 P2: -90 P3: -50 P4: -130"``."""
-    return " ".join(f"{seat}: {snapshot.totals[seat]}" for seat in SEATS)
+    return " ".join(f"{player_label(snapshot.group_id, seat)}: {snapshot.totals[seat]}" for seat in SEATS)
 
 
 def round_label(snapshot: RoomSnapshot) -> str:
@@ -134,7 +138,7 @@ def pending_seats(snapshot: RoomSnapshot) -> list[str]:
     """Seats that still have to choose (only meaningful while a round is open)."""
     if snapshot.phase is not Phase.OPEN:
         return []
-    return [seat.label for seat in snapshot.seats if not seat.submitted]
+    return [player_label(snapshot.group_id, seat.label) for seat in snapshot.seats if not seat.submitted]
 
 
 def md_escape(text: str) -> str:
@@ -151,7 +155,7 @@ def seat_name(seat: SeatView) -> str:
 
 def seats_line(snapshot: RoomSnapshot) -> str:
     """``"P1 Ann · P2 Bot (Smart) · P3 free · P4 no name yet"``."""
-    return " · ".join(f"{seat.label} {seat_name(seat)}" for seat in snapshot.seats)
+    return " · ".join(f"{player_label(snapshot.group_id, seat.label)} {seat_name(seat)}" for seat in snapshot.seats)
 
 
 def seat_status(seat: SeatView, phase: Phase) -> str:
@@ -178,7 +182,7 @@ def overview_frame(snapshots: Sequence[RoomSnapshot]) -> pd.DataFrame:
             "Group": snap.group_id,
             "Status": round_label(snap),
             "Waiting for": ", ".join(pending_seats(snap)),
-            "Free seats": ", ".join(s.label for s in snap.seats if s.is_free),
+            "Free seats": ", ".join(player_label(snap.group_id, s.label) for s in snap.seats if s.is_free),
             "Group total": snap.group_total,
         }
         for snap in snapshots
@@ -274,7 +278,7 @@ def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> Non
             lambda row: [_BONUS_ROW_STYLE if row.name in bonus_rows else ""] * len(row), axis=1
         )
         if title_seat in SEATS:
-            styler = styler.map(lambda _: _OWN_COLUMN_STYLE, subset=[title_seat])
+            styler = styler.map(lambda _: _OWN_COLUMN_STYLE, subset=[player_label(snapshot.group_id, title_seat)])
         st.dataframe(
             styler,
             hide_index=True,
@@ -283,7 +287,7 @@ def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> Non
                 # (30 + 48 + 4 x 62 = 326px). On wider screens the grid shares out the extra space equally.
                 "RD": st.column_config.NumberColumn("RD", width=30),
                 "Total": st.column_config.NumberColumn("Total", width=48),
-                **{seat: st.column_config.TextColumn(seat, width=62) for seat in SEATS},
+                **{label: st.column_config.TextColumn(label, width=62) for label in frame.columns[2:]},
             },
         )
     st.caption(totals_line(snapshot))
@@ -361,7 +365,7 @@ def player_view(registry: RoomRegistry, settings: Settings, token: str) -> None:
             st.rerun()
         return
     me = next(s for s in snapshot.seats if s.label == seat)
-    st.header(f"{seat} | Group {group_id}", anchor=False)
+    st.header(f"{player_label(group_id, seat)} | Group {group_id}", anchor=False)
     if not me.name:
         _name_step(registry, token, snapshot.phase)
         return
@@ -625,7 +629,7 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
     render_round_status(snap)
     for col, seat in zip(st.columns(4), snap.seats, strict=True):
         with col.container(border=True):
-            st.markdown(f"**{seat.label}**{' 🤖' if seat.is_bot else ''}")
+            st.markdown(f"**{player_label(gid, seat.label)}**{' 🤖' if seat.is_bot else ''}")
             st.caption(seat_status(seat, phase))
 
     waiting = pending_seats(snap)
@@ -689,7 +693,10 @@ def _bot_controls(registry: RoomRegistry, snap: RoomSnapshot) -> None:
         )
     with replace_col:
         seat_col, strat_col = st.columns(2)
-        seat_col.selectbox("Seat", humans or ["–"], key=f"replace_seat_{gid}", disabled=not humans)
+        seat_col.selectbox(
+            "Seat", humans or ["–"], key=f"replace_seat_{gid}", disabled=not humans,
+            format_func=lambda label: player_label(gid, label) if label in SEATS else label,
+        )
         strat_col.selectbox("Strategy", strategies, key=f"replace_strategy_{gid}")
         st.button(
             "Replace seat with bot", key=f"replace_{gid}", disabled=not humans,

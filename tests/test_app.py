@@ -196,13 +196,13 @@ def test_host_creates_groups_and_join_view_lists_every_seat():
 
     join = run()
     assert texts(join.subheader) == ["Pick a seat"]
-    assert [b.label for b in join.button] == [*SEATS, *SEATS]
+    assert [b.label for b in join.button] == [f"P{n}" for n in range(1, 9)]  # Group 2 is P5-P8
     assert not any(b.disabled for b in join.button)
     app_registry().join(1, "P1", "Ann")
     app_registry().take_seat(2, "P4")
     join = run()
     assert join.button(key="join_1_P1").label == "P1 · Ann" and join.button(key="join_1_P1").disabled
-    assert join.button(key="join_2_P4").label == "P4 · no name yet" and join.button(key="join_2_P4").disabled
+    assert join.button(key="join_2_P4").label == "P8 · no name yet" and join.button(key="join_2_P4").disabled
     assert not join.button(key="join_1_P2").disabled
 
 
@@ -309,10 +309,13 @@ def test_player_sees_all_groups_tab_with_every_board():
     assert [e.label for e in at.expander] == ["Group 1 (your group)", "Group 2", "Group 3"]
     boards = [df.value for df in at.dataframe[2:]]
     assert boards[0].to_dict("records") == [{"RD": 1, "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"}]
-    assert list(boards[1]["P1"]) == ["Y +10", "X +20"]
+    assert list(boards[1].columns) == ["RD", "Total", "P5", "P6", "P7", "P8"]
+    assert list(boards[1]["P5"]) == ["Y +10", "X +20"]
     assert len(boards) == 2  # group 3 has nothing revealed
     assert "No rounds revealed yet." in texts(at.caption)
-    assert "P1 G2P1 · P2 G2P2 · P3 G2P3 · P4 G2P4" in texts(at.caption)
+    assert "P5 G2P1 · P6 G2P2 · P7 G2P3 · P8 G2P4" in texts(at.caption)
+    assert "P1: 30 P2: -10 P3: -10 P4: -10" in texts(at.caption)
+    assert "P5: 30 P6: 30 P7: -10 P8: -10" in texts(at.caption)
 
 
 def test_single_group_has_no_all_groups_tab():

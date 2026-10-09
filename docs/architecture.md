@@ -211,7 +211,10 @@ def check_login(settings: Settings, username: str, password: str) -> bool   # hm
 * `wallstreet/auth.py`: `HostSessions(ttl_sec=12 * 3600)`: thread-safe `issue() -> str`,
   `is_valid(token) -> bool`, `revoke(token)`; random `secrets.token_urlsafe(32)` tokens kept in
   memory, expired ones purged.
-* Results table columns `RD | Total | P1 | P2 | P3 | P4`; cells `"X +10"` / `"Y -30"`; Total = round group total.
+* Seats are shown numbered across groups with `scoring.player_label(group_id, seat)`: Group 1 is
+  P1-P4, Group 2 is P5-P8, ... (UI, leaderboard rows and the JSON export). Internally every group
+  keeps `SEATS` = P1-P4 for scoring, bots, tokens and widget keys.
+* Results table columns `RD | Total | P1 | P2 | P3 | P4` (Group 2: `P5..P8`); cells `"X +10"` / `"Y -30"`; Total = round group total.
   Footer: `P1: 270 P2: -90 P3: -50 P4: -130`. Header `Group N | Group total T`.
 * Live parts use `@st.fragment(run_every=settings.refresh_sec)`.
 * `views.py` keeps logic in pure helpers that never touch streamlit and are unit-tested directly:

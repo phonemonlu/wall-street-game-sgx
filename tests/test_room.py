@@ -629,9 +629,9 @@ def test_leaderboard_competition_ranking(reg: RoomRegistry):
     assert len(rows) == 9  # free seats are left out
     assert [r["rank"] for r in rows] == [1, 1, 1, 1, 5, 6, 6, 6, 6]
     assert [(r["group"], r["seat"], r["points"]) for r in rows[:5]] == [
-        (1, "P1", 250), (1, "P2", 250), (1, "P3", 250), (1, "P4", 250), (3, "P1", 0)
+        (1, "P1", 250), (1, "P2", 250), (1, "P3", 250), (1, "P4", 250), (3, "P9", 0)  # numbered across groups
     ]
-    assert rows[4] == {"rank": 5, "group": 3, "seat": "P1", "name": "Ann", "bot": False, "points": 0}
+    assert rows[4] == {"rank": 5, "group": 3, "seat": "P9", "name": "Ann", "bot": False, "points": 0}
     assert rows[0]["name"] == "Bot (Always Y)" and rows[0]["bot"] is True
     assert list(rows[0]) == ["rank", "group", "seat", "name", "bot", "points"]
 
@@ -741,5 +741,16 @@ def test_rename_and_take_seat_errors(reg: RoomRegistry):
         reg.take_seat(99, "P1")
     with pytest.raises(UnknownSeat):
         reg.take_seat(1, "P9")
+
+
+def test_export_numbers_seats_across_groups(reg: RoomRegistry):
+    tokens = join_all(reg, 2)
+    reg.start(2)
+    submit_all(reg, tokens, "XYYY")
+    reg.reveal(2)
+    g2 = reg.export()["groups"][1]
+    assert [seat["seat"] for seat in g2["seats"]] == ["P5", "P6", "P7", "P8"]
+    assert g2["rounds"][0]["choices"] == {"P5": "X", "P6": "Y", "P7": "Y", "P8": "Y"}
+    assert g2["rounds"][0]["payoffs"] == {"P5": 30, "P6": -10, "P7": -10, "P8": -10}
 
 
