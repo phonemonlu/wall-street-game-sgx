@@ -134,6 +134,17 @@ def test_round_label_bonus_hint_and_countdown():
     assert "- **Group 2**: nope" in views.skipped_text("Start all", {2: "nope"})
 
 
+def test_player_names_cannot_inject_markdown():
+    assert views.md_escape("Ann (B.)") == "Ann (B.)"
+    assert views.md_escape("![x](https://evil.example/x.png)") == r"\!\[x\](https\://evil.example/x.png)"
+    assert views.md_escape(":red[# big] **b**") == r"\:red\[\# big\] \*\*b\*\*"
+    reg = RoomRegistry()
+    reg.create_groups(1)
+    reg.join(1, "P1", "[click](https://evil.example)")
+    seat = reg.snapshot(1).seats[0]
+    assert views.seat_status(seat, Phase.LOBBY) == r"\[click\](https\://evil.example) (human)"
+
+
 def test_bonus_hint_respects_short_games():
     reg = RoomRegistry(rounds=4)
     reg.create_groups(1)
@@ -181,6 +192,7 @@ def test_player_joins_and_token_lands_in_query_params():
     at.button(key="join_button").click().run()
     assert not at.exception
     token = at.query_params["seat"]
+    token = token[-1] if isinstance(token, list) else token  # older AppTest returns a list
     assert app_registry().locate(token) == (1, "P2")
     assert texts(at.header) == ["P2 | Group 1"]
     assert "Ann" in at.caption[0].value

@@ -1,7 +1,7 @@
 # Architecture & interface contract
 
 Streamlit app for the Wall Street Game (4-player iterated prisoner's dilemma, 10 rounds,
-bonus multipliers ×3 / ×5 / ×10 in rounds 5 / 8 / 10). Python 3.12+, `streamlit>=1.37`, `pandas`.
+bonus multipliers ×3 / ×5 / ×10 in rounds 5 / 8 / 10). Python 3.12+, `streamlit>=1.54`, `pandas`.
 
 ## Layers (imports only point downward; only `app.py` / `views.py` import streamlit)
 

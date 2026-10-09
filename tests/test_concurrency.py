@@ -91,11 +91,14 @@ def test_parallel_bot_games(strategy: str):
 
     def reader() -> None:
         last: dict[int, int] = {}
-        while not stop.is_set():
-            for snap in reg.snapshots():
-                if snap.version < last.get(snap.group_id, -1):
-                    reader_errors.append(f"group {snap.group_id} went back to v{snap.version}")
-                last[snap.group_id] = snap.version
+        try:
+            while not stop.is_set():
+                for snap in reg.snapshots():
+                    if snap.version < last.get(snap.group_id, -1):
+                        reader_errors.append(f"group {snap.group_id} went back to v{snap.version}")
+                    last[snap.group_id] = snap.version
+        except Exception as err:  # a crashed reader thread must fail the test, not be ignored
+            reader_errors.append(repr(err))
 
     def play(group_id: int) -> None:
         reg.fill_with_bots(group_id, strategy)

@@ -71,12 +71,17 @@ def reader(reg: RoomRegistry, rec: Recorder, log: VersionLog, stop: threading.Ev
     local: dict[int, int] = {}
     while not stop.is_set():
         group_id = rng.choice(ids)
-        snap = rec.timed("snapshot", lambda: reg.snapshot(group_id))
-        log.observe(group_id, snap.version, local)
-        if rng.random() < 0.05:  # the host/leaderboard pages poll everything
-            for snap in rec.timed("snapshots", reg.snapshots):
-                log.observe(snap.group_id, snap.version, local)
-            rec.timed("leaderboard", reg.leaderboard)
+        try:
+            snap = rec.timed("snapshot", lambda: reg.snapshot(group_id))
+            log.observe(group_id, snap.version, local)
+            if rng.random() < 0.05:  # the host/leaderboard pages poll everything
+                for snap in rec.timed("snapshots", reg.snapshots):
+                    log.observe(snap.group_id, snap.version, local)
+                rec.timed("leaderboard", reg.leaderboard)
+        except Exception as err:  # a dead reader must fail the run, not vanish silently
+            with log.lock:
+                log.violations.append(f"reader {seed}: {type(err).__name__}: {err}")
+            return
 
 
 def check_invariants(reg: RoomRegistry, rounds: int, log: VersionLog) -> list[str]:

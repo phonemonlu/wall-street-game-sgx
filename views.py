@@ -7,6 +7,7 @@ that part of the page refreshes.
 """
 
 import json
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ _BIG_BUTTONS_CSS = """<style>
 .st-key-pick_X button, .st-key-pick_Y button { min-height: 6rem; }
 .st-key-pick_X button p, .st-key-pick_Y button p { font-size: 2.6rem; font-weight: 700; }
 </style>"""
+# Markdown syntax a player could smuggle in through their name (links, images, badges, headings, ...).
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]!:$<>#~|])")
 _OWN_COLUMN_STYLE = "background-color: rgba(255, 75, 75, 0.14)"
 _BONUS_ROW_STYLE = "background-color: rgba(255, 170, 0, 0.10)"
 
@@ -110,11 +113,16 @@ def pending_seats(snapshot: RoomSnapshot) -> list[str]:
     return [seat.label for seat in snapshot.seats if not seat.submitted]
 
 
+def md_escape(text: str) -> str:
+    """Backslash-escape markdown syntax so a player-chosen name renders as plain text."""
+    return _MD_SPECIAL.sub(r"\\\1", text)
+
+
 def seat_status(seat: SeatView, phase: Phase) -> str:
     """``"Bot (Always Y) · ✓ submitted"`` / ``"Ann · pending"`` / ``"free"``."""
     if seat.is_free:
         return "free"
-    who = seat.name if seat.is_bot else f"{seat.name} (human)"
+    who = seat.name if seat.is_bot else f"{md_escape(seat.name)} (human)"
     if phase is not Phase.OPEN:
         return who
     return f"{who} · {'✓ submitted' if seat.submitted else '⏳ pending'}"
@@ -306,7 +314,7 @@ def player_view(registry: RoomRegistry, settings: Settings, token: str) -> None:
         return
     me = next(s for s in snapshot.seats if s.label == seat)
     st.header(f"{seat} | Group {group_id}", anchor=False)
-    st.caption(f"Playing as **{me.name}**. Keep this URL: it is your seat.")
+    st.caption(f"Playing as **{md_escape(me.name)}**. Keep this URL: it is your seat.")
     st.html(_BIG_BUTTONS_CSS)
     _live(_player_live, settings)(registry, token, group_id, seat)
 
