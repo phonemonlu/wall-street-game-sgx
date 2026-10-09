@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+from wallstreet.auth import HostSessions
 from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
@@ -23,6 +24,10 @@ from wallstreet.scoring import SEATS, Card
 from wallstreet.strategies import STRATEGIES
 
 TITLE = "Wall Street Game"
+# Page scripts, relative to app.py (routed by st.navigation there).
+PLAYER_PAGE = "app_pages/player.py"
+LOGIN_PAGE = "app_pages/login.py"
+HOST_PAGE = "app_pages/host.py"
 NO_LOGIN_WARNING = (
     "No host login set: anyone with this URL can control the game. "
     "Set WSG_HOST_USERNAME and WSG_HOST_PASSWORD to lock it."
@@ -269,6 +274,16 @@ def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
 # -- join -----------------------------------------------------------------------------------------
 
 
+def player_page(registry: RoomRegistry, settings: Settings) -> None:
+    """``/``: the join form, or the seat's game when the URL carries ``?seat=<token>``."""
+    if st.query_params.get("role") == "host":  # old host links (``/?role=host``)
+        st.switch_page(LOGIN_PAGE)
+    if token := st.query_params.get("seat"):
+        player_view(registry, settings, token)
+    else:
+        join_view(registry)
+
+
 def join_view(registry: RoomRegistry) -> None:
     st.title(TITLE)
     open_seats = registry.open_seats()
@@ -374,36 +389,85 @@ def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -
 # -- host -----------------------------------------------------------------------------------------
 
 
-def host_view(registry: RoomRegistry, settings: Settings) -> None:
+def login_page(settings: Settings, sessions: HostSessions) -> None:
+    """``/login``: on success the host lands on ``/host?auth=<token>`` (valid for 12 hours)."""
+    if not settings.host_login_required:
+        st.switch_page(HOST_PAGE)
+    if sessions.is_valid(token := st.session_state.get("host_auth")):
+        st.switch_page(HOST_PAGE, query_params={"auth": token})
     st.title(TITLE)
-    if not _host_unlocked(settings):
-        return
+    st.subheader("Host login")
+    with st.form("host_login_form"):
+        username = st.text_input("Username", key="host_username_input", autocomplete="username")
+        password = st.text_input(
+            "Password", type="password", key="host_password_input", autocomplete="current-password"
+        )
+        submitted = st.form_submit_button("Log in", type="primary")
+    if submitted:
+        if check_login(settings, username, password):
+            token = sessions.issue()
+            st.session_state["host_auth"] = token
+            st.switch_page(HOST_PAGE, query_params={"auth": token})
+        st.error(WRONG_LOGIN)
+
+
+def host_page(registry: RoomRegistry, settings: Settings, sessions: HostSessions) -> None:
+    """``/host``: controls for every group. Sends the host to ``/login`` unless logged in."""
+    token = None
+    if settings.host_login_required:
+        token = _host_token(sessions)
+        if token is None:
+            st.switch_page(LOGIN_PAGE)
+    title_col, logout_col = st.columns([4, 1], vertical_alignment="center")
+    title_col.title(f"{TITLE} · Host", anchor=False)
+    if token is not None and logout_col.button("Log out", key="host_logout"):
+        sessions.revoke(token)
+        st.session_state.pop("host_auth", None)
+        st.switch_page(LOGIN_PAGE)
+    host_view(registry, settings)
+
+
+def _host_token(sessions: HostSessions) -> str | None:
+    """The host's valid login token, from the URL (survives a refresh) or this session."""
+    for token in (st.query_params.get("auth"), st.session_state.get("host_auth")):
+        if sessions.is_valid(token):
+            st.session_state["host_auth"] = token
+            st.query_params["auth"] = token  # keeps the host logged in across a refresh
+            return token
+    st.session_state.pop("host_auth", None)
+    return None
+
+
+def host_view(registry: RoomRegistry, settings: Settings) -> None:
     render_banner(settings)
     group_ids = registry.group_ids()
     _setup(registry, group_ids)
     if group_ids:
         _global_controls(registry)
+        _host_play(registry)
         _groups_area(registry, settings, group_ids)
     else:
         st.info("Create groups in **Setup** to begin. Players can then join from the main URL.")
     _reset_controls(registry)
 
 
-def _host_unlocked(settings: Settings) -> bool:
-    if not settings.host_login_required or st.session_state.get("host_logged_in"):
-        return True
-    with st.form("host_login_form"):
-        username = st.text_input("Username", key="host_username_input", autocomplete="username")
-        password = st.text_input(
-            "Password", type="password", key="host_password_input", autocomplete="current-password"
-        )
-        submitted = st.form_submit_button("Log in")
-    if submitted:
-        if check_login(settings, username, password):
-            st.session_state["host_logged_in"] = True
-            st.rerun()
-        st.error(WRONG_LOGIN)
-    return False
+def _host_play(registry: RoomRegistry) -> None:
+    """Lets the host take a seat; they then play it on the normal player page."""
+    token = st.query_params.get("seat")
+    try:
+        group_id, seat = registry.locate(token) if token else (None, None)
+    except (UnknownSeat, UnknownGroup):
+        group_id = seat = None
+        st.query_params.pop("seat", None)  # reset, or handed to a bot
+    if seat is not None:
+        with st.container(border=True):
+            st.markdown(f"**You play as {player_label(group_id, seat)} in Group {group_id}.**")
+            st.link_button("Open my player page", f"./?seat={token}", type="primary", key="host_seat_link")
+            st.caption("Opens in a new tab. You can also open that link on your phone.")
+        return
+    with st.expander("Play as a player"):
+        st.caption("Take a seat here, then open your player page to choose your name and play.")
+        seat_picker(registry, "host_join")
 
 
 def _setup(registry: RoomRegistry, group_ids: list[int]) -> None:

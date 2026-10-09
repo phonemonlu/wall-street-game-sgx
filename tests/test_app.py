@@ -39,9 +39,27 @@ def fresh_app(monkeypatch: pytest.MonkeyPatch):
 
 
 def run(**params: str) -> AppTest:
+    """The player page (``/``)."""
     at = AppTest.from_file(APP, default_timeout=10)
     at.query_params.update(params)
     return at.run()
+
+
+def run_page(page: str, **params: str) -> AppTest:
+    """Open one of the app's pages (``views.LOGIN_PAGE`` / ``views.HOST_PAGE``) in a new session."""
+    at = AppTest.from_file(APP, default_timeout=10)
+    at.run()  # st.navigation registers the pages on the first run
+    at.switch_page(page)
+    at.query_params.update(params)
+    return at.run()
+
+
+def run_host(**params: str) -> AppTest:
+    return run_page(views.HOST_PAGE, **params)
+
+
+def on_login_page(at: AppTest) -> bool:
+    return bool(at.text_input) and at.text_input[0].key == "host_username_input"
 
 
 def app_registry() -> RoomRegistry:
@@ -218,33 +236,116 @@ def test_join_errors_are_friendly():
 
 
 def test_host_page_warns_without_login():
-    at = run(role="host")
+    at = run_host()
     assert not at.exception
-    assert texts(at.title) == ["Wall Street Game"]
+    assert texts(at.title) == ["Wall Street Game · Host"]
     assert texts(at.warning) == [views.NO_LOGIN_WARNING]
     assert at.button(key="create_groups")
+    assert "host_logout" not in button_keys(at)  # nothing to log out of
 
 
-def test_pin_gate_blocks_without_right_pin(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("WSG_HOST_PIN", "4321")
-    at = run(role="host")
-    assert not at.warning
-    assert not at.expander and "create_groups" not in button_keys(at)
-    at.text_input(key="host_pin_input").input("1111")
-    at.button[0].click().run()  # the form's submit button
-    assert texts(at.error) == ["Wrong PIN."]
-    assert "create_groups" not in button_keys(at)
-    at.text_input(key="host_pin_input").input("4321")
-    at.button[0].click().run()
+def test_login_page_goes_straight_to_host_without_login():
+    at = run_page(views.LOGIN_PAGE)
     assert not at.exception
     assert at.button(key="create_groups")
-    assert not at.warning  # a PIN is set: no warning banner
-    at.run()  # remembered in session_state
+
+
+def test_player_page_has_no_host_link():
+    at = run()
+    assert not at.sidebar.markdown and not at.sidebar.caption
+    assert all("host" not in md.value.lower() for md in at.markdown)
+
+
+def test_old_host_link_goes_to_login(monkeypatch: pytest.MonkeyPatch):
+    set_login(monkeypatch)
+    assert on_login_page(run(role="host"))
+
+
+def set_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WSG_HOST_USERNAME", "admin")
+    monkeypatch.setenv("WSG_HOST_PASSWORD", "s3cret!")
+
+
+def log_in(at: AppTest, username: str, password: str) -> AppTest:
+    at.text_input(key="host_username_input").input(username)
+    at.text_input(key="host_password_input").input(password)
+    return at.button[0].click().run()  # the form's submit button
+
+
+def test_host_page_sends_strangers_to_login(monkeypatch: pytest.MonkeyPatch):
+    set_login(monkeypatch)
+    for at in (run_host(), run_host(auth="made-up")):
+        assert not at.exception
+        assert on_login_page(at)
+        assert "create_groups" not in button_keys(at)
+
+
+def test_login_rejects_wrong_credentials(monkeypatch: pytest.MonkeyPatch):
+    set_login(monkeypatch)
+    at = run_page(views.LOGIN_PAGE)
+    assert texts(at.subheader) == ["Host login"]
+    for username, password in [("admin", "wrong"), ("someone", "s3cret!"), ("", "")]:
+        log_in(at, username, password)
+        assert texts(at.error) == [views.WRONG_LOGIN]
+        assert "create_groups" not in button_keys(at)
+
+
+def test_login_opens_host_page_and_survives_refresh(monkeypatch: pytest.MonkeyPatch):
+    set_login(monkeypatch)
+    at = log_in(run_page(views.LOGIN_PAGE), "admin", "s3cret!")
+    assert not at.exception
     assert at.button(key="create_groups")
+    assert not at.warning  # a login is set: no warning banner
+    token = at.query_params["auth"]
+    assert token
+    at.run()
+    assert at.button(key="create_groups")
+    refreshed = run_host(auth=token)  # a browser refresh is a new session with the same URL
+    assert refreshed.button(key="create_groups")
+    assert refreshed.query_params["auth"] == token
+
+
+def test_logout_ends_the_login(monkeypatch: pytest.MonkeyPatch):
+    set_login(monkeypatch)
+    token = log_in(run_page(views.LOGIN_PAGE), "admin", "s3cret!").query_params["auth"]
+    # AppTest keeps running the page it was switched to by the test, not one the script switched
+    # to, so open /host directly (as a refreshed browser would) before clicking Log out.
+    at = run_host(auth=token)
+    at.button(key="host_logout").click().run()
+    assert not at.exception
+    assert "host_auth" not in at.session_state
+    assert on_login_page(run_host(auth=token))  # the old link no longer works
+
+
+def test_host_takes_a_seat_and_gets_a_player_link():
+    at = run_host()
+    reg = app_registry()
+    reg.create_groups(2)
+    at.run()
+    assert not at.get("link_button")
+    at.button(key="host_join_2_P3").click().run()
+    assert not at.exception
+    token = at.query_params["seat"]
+    assert reg.locate(token) == (2, "P3")
+    assert any("You play as P7 in Group 2" in md.value for md in at.markdown)
+    (link,) = at.get("link_button")
+    assert link.proto.url == f"./?seat={token}"
+    assert "host_join_2_P3" not in button_keys(at)
+
+    player = run(seat=token)  # the link opens the normal player page for that seat
+    assert texts(player.header) == ["P7 | Group 2"]
+    assert player.text_input(key="name_input")  # the host names the seat there
+
+    reg.reset()  # the seat is gone: the host can join again
+    reg.create_groups(1)
+    at.run()
+    assert not at.get("link_button")
+    assert "seat" not in at.query_params
+    assert at.button(key="host_join_1_P1")
 
 
 def test_reset_disabled_until_confirmed():
-    at = run(role="host")
+    at = run_host()
     app_registry().create_groups(2)
     at.run()
     assert at.button(key="reset_game").disabled
@@ -257,7 +358,7 @@ def test_reset_disabled_until_confirmed():
 
 
 def test_recreating_groups_needs_confirmation():
-    at = run(role="host")
+    at = run_host()
     at.button(key="create_groups").click().run()
     assert app_registry().group_ids() == [1]
     assert at.button(key="create_groups").disabled
@@ -268,7 +369,7 @@ def test_recreating_groups_needs_confirmation():
 
 
 def test_host_group_controls_bots_and_global_actions():
-    at = run(role="host")
+    at = run_host()
     reg = app_registry()
     reg.create_groups(2)
     token = reg.join(1, "P1", "Ann")
@@ -298,7 +399,7 @@ def test_host_group_controls_bots_and_global_actions():
 
 
 def test_host_bonus_prompt_starts_group_timer():
-    at = run(role="host")
+    at = run_host()
     reg = app_registry()
     reg.create_groups(1)
     reg.fill_with_bots(1, "Always Y")
@@ -317,7 +418,7 @@ def test_host_bonus_prompt_starts_group_timer():
 
 
 def test_host_many_groups_use_a_selectbox_and_leaderboard_exports():
-    at = run(role="host")
+    at = run_host()
     app_registry().create_groups(9)
     at.run()
     assert [tab.label for tab in at.tabs] == ["Groups", "Leaderboard"]

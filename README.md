@@ -59,10 +59,24 @@ Then open:
 | URL | Who |
 |---|---|
 | `http://<host>:8501/` | **Players**: pick a group and a free seat, enter a name, click Join |
-| `http://<host>:8501/?role=host` | **Host**: create groups, start/reveal/advance rounds, bots, timers, leaderboard |
+| `http://<host>:8501/login` | **Host login**: username and password (see [Configuration](#configuration)) |
+| `http://<host>:8501/host` | **Host**: create groups, start/reveal/advance rounds, bots, timers, leaderboard. Sends you to `/login` first. |
+
+Players see no link to the host pages; the host goes to `/login` directly. Old `/?role=host` links
+redirect to `/login`.
 
 After joining, a player's URL becomes `/?seat=<token>`. That URL *is* the seat: reloading the page or
 reopening it on the same device keeps the seat. Treat it like a password.
+
+After logging in, the host's URL becomes `/host?auth=<token>`. It keeps the host logged in for 12
+hours, across refreshes, so treat it like a password too. **Log out** (top right) ends it at once,
+and restarting the server logs every host out.
+
+### The host as a player
+
+The host can take a seat too: on the host page, open **Play as a player** and tap a free seat.
+**Open my player page** then opens that seat's normal player page in a new tab (or open the same
+link on your phone), where you enter your name. Play from that tab; run the game from the host tab.
 
 ### Running a session
 
@@ -101,8 +115,9 @@ their card until the reveal, and the bot always answers the final cards.
 ```
  browser tabs (host / players)            one Python process
  ─────────────────────────────            ──────────────────────────────────────────────────────
-  /?role=host  ──┐                         app.py      page config, routing on st.query_params,
-  /?seat=<tok> ──┼── websocket ─────────▶              @st.cache_resource RoomRegistry (shared)
+  /login       ──┐                         app.py      page config, st.navigation (hidden):
+  /host        ──┤                                     app_pages/{player,login,host}.py
+  /?seat=<tok> ──┼── websocket ─────────▶  runtime.py  @st.cache_resource RoomRegistry + HostSessions
   /            ──┘                          │
                                             ▼
                                            views.py    render functions + pure helpers

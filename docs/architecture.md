@@ -186,13 +186,24 @@ class Settings:
 def check_login(settings: Settings, username: str, password: str) -> bool   # hmac.compare_digest on both; True if no login set
 ```
 
-## UI (`app.py`, `views.py`)
+## UI (`app.py`, `app_pages/`, `runtime.py`, `views.py`)
 
-* `?role=host` → host view (username/password login if `WSG_HOST_USERNAME` and `WSG_HOST_PASSWORD`
-  are set, else yellow warning "No host login set: anyone with this URL can control the game.
-  Set WSG_HOST_USERNAME and WSG_HOST_PASSWORD to lock it.").
-* `?seat=<token>` → player view (token in URL so browser refresh keeps the seat).
-* otherwise → join view.
+* `app.py` routes with `st.navigation(position="hidden")` to three page scripts in `app_pages/`,
+  each a one-line call into `views.py` with state from `runtime.py` (cached `RoomRegistry` and
+  `HostSessions`, uncached `Settings`):
+  * `/` (`player.py` → `views.player_page`): `?seat=<token>` → player view (token in URL so browser
+    refresh keeps the seat); otherwise → join view. `?role=host` (old links) → `/login`.
+  * `/login` (`login.py` → `views.login_page`): username/password form. On success
+    `HostSessions.issue()` and `st.switch_page` to `/host?auth=<token>`. Without a configured login
+    it goes straight to `/host`.
+  * `/host` (`host.py` → `views.host_page`): needs a valid `auth` token (URL or session state),
+    else → `/login`. **Log out** revokes the token. Without a configured login it shows the yellow
+    warning "No host login set: anyone with this URL can control the game. Set WSG_HOST_USERNAME and
+    WSG_HOST_PASSWORD to lock it." **Play as a player** reuses `views.join_form`; the host's seat
+    token is kept as `?seat=` on the host URL, with a link to `./?seat=<token>`.
+* `wallstreet/auth.py`: `HostSessions(ttl_sec=12 * 3600)`: thread-safe `issue() -> str`,
+  `is_valid(token) -> bool`, `revoke(token)`; random `secrets.token_urlsafe(32)` tokens kept in
+  memory, expired ones purged.
 * Results table columns `RD | Total | P1 | P2 | P3 | P4`; cells `"X +10"` / `"Y -30"`; Total = round group total.
   Footer: `P1: 270 P2: -90 P3: -50 P4: -130`. Header `Group N | Group total T`.
 * Live parts use `@st.fragment(run_every=settings.refresh_sec)`.
