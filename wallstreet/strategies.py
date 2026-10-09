@@ -43,20 +43,30 @@ class SmartBot:
         return Card.Y
 
 
-def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int) -> dict[str, Card]:
+def smart_choices(
+    choices: Mapping[str, Card],
+    smart_seats: Collection[str],
+    round_no: int,
+    totals: Mapping[str, int] | None = None,
+) -> dict[str, Card]:
     """Best cards for ``smart_seats`` given everyone else's cards in ``choices``.
 
     The smart seats act as one team: highest group total first, then the highest combined score
     of the smart seats. With the PAYOFF table a lone smart bot therefore plays X, unless the other
-    three all chose the same card, then Y (it gives up 20 points to save the group 40). Ties go to
-    the first combination in seat order, X before Y, so the result is deterministic.
+    three all chose the same card, then Y (it gives up 20 points to save the group 40).
+
+    When the team must split its cards, the worse card goes to the bot that would otherwise end
+    up richest (``totals`` are the scores before this round), so the bots take turns. Remaining
+    ties go to the first combination in seat order, X before Y, so the result is deterministic.
     """
     team = [seat for seat in SEATS if seat in smart_seats]
     others = {seat: Card(card) for seat, card in choices.items() if seat not in smart_seats}
+    before = totals or {}
 
-    def rank(pick: dict[str, Card]) -> tuple[int, int]:
+    def rank(pick: dict[str, Card]) -> tuple[int, int, int]:
         payoffs = score_round({**others, **pick}, round_no)
-        return sum(payoffs.values()), sum(payoffs[seat] for seat in team)
+        poorest = min((before.get(seat, 0) + payoffs[seat] for seat in team), default=0)
+        return sum(payoffs.values()), sum(payoffs[seat] for seat in team), poorest
 
     combos = (dict(zip(team, cards, strict=True)) for cards in product(Card, repeat=len(team)))
     return max(combos, key=rank)

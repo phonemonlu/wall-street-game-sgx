@@ -573,3 +573,37 @@ def test_player_seat_handed_to_bot_shows_error():
     reg.replace_with_bot(1, "P3", "Random")
     at.run()
     assert "no longer valid" in at.error[0].value
+
+
+def test_reveal_button_always_has_a_tooltip():
+    reg = RoomRegistry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    assert views.reveal_help(reg.snapshot(1)) == "Start the game first."
+    reg.start(1)
+    reg.submit(tokens["P1"], Card.X)
+    assert views.reveal_help(reg.snapshot(1)) == "Waiting for P2, P3, P4"
+    for seat in ("P2", "P3", "P4"):
+        reg.submit(tokens[seat], Card.Y)
+    assert views.reveal_help(reg.snapshot(1)) == "Everyone has chosen."
+    reg.reveal(1)
+    assert views.reveal_help(reg.snapshot(1)).startswith("This round is revealed")
+
+
+def test_bonus_prompt_hides_once_the_break_starts():
+    at = run_host()
+    reg = app_registry()
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    for i in range(4):
+        if i:
+            reg.next_round(1)
+        reg.reveal(1)
+    at.run()
+    prompt = "Next round is a ×3 bonus — start a negotiation break?"
+    assert any(prompt in md.value for md in at.markdown)
+    at.button(key="break_1").click().run()
+    assert reg.snapshot(1).timer_ends_at is not None
+    assert not any(prompt in md.value for md in at.markdown)
+    assert "break_1" not in button_keys(at)

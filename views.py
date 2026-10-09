@@ -141,6 +141,18 @@ def pending_seats(snapshot: RoomSnapshot) -> list[str]:
     return [player_label(snapshot.group_id, seat.label) for seat in snapshot.seats if not seat.submitted]
 
 
+def reveal_help(snapshot: RoomSnapshot) -> str:
+    """Tooltip for a group's Reveal button, for every phase."""
+    if waiting := pending_seats(snapshot):
+        return f"Waiting for {', '.join(waiting)}"
+    return {
+        Phase.LOBBY: "Start the game first.",
+        Phase.OPEN: "Everyone has chosen.",
+        Phase.REVEALED: "This round is revealed. Open the next round first.",
+        Phase.OVER: "The game is over.",
+    }[snapshot.phase]
+
+
 def md_escape(text: str) -> str:
     """Backslash-escape markdown syntax so a player-chosen name renders as plain text."""
     return _MD_SPECIAL.sub(r"\\\1", text)
@@ -638,8 +650,8 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
         cols,
         (
             ("Start", registry.start, phase is Phase.LOBBY, None),
-            ("Reveal", registry.reveal, phase is Phase.OPEN and not waiting,
-             f"Waiting for {', '.join(waiting)}" if waiting else None),
+            # Reveal always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
+            ("Reveal", registry.reveal, phase is Phase.OPEN and not waiting, reveal_help(snap)),
             ("Next round", registry.next_round, phase is Phase.REVEALED, None),
         ),
         strict=True,
@@ -650,7 +662,8 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
         )
 
     secs = _Widget(f"timer_secs_{gid}", DEFAULT_TIMER_SEC)
-    if phase is Phase.REVEALED and snap.next_multiplier > 1:
+    # Hidden once a timer is running (the break has started); next_round cancels the timer.
+    if phase is Phase.REVEALED and snap.next_multiplier > 1 and snap.timer_ends_at is None:
         with st.container(border=True):
             st.markdown(f"### Next round is a ×{snap.next_multiplier} bonus — start a negotiation break?")
             st.button(

@@ -97,10 +97,12 @@ Implementations: `RandomStrategy(p_x: float = 0.5, seed: int | None = None)` and
 submitted. `Room.reveal()` (under the room lock, once every seat has a card) replaces the
 placeholders with
 ```python
-def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int) -> dict[str, Card]
+def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int,
+                  totals: Mapping[str, int] | None = None) -> dict[str, Card]
 ```
 which tries every card combination for the smart seats (a team) and keeps the one with the
-highest group total, then the highest team score; ties go to the first combination in seat order,
+highest group total, then the highest team score, then the highest lowest-bot total after the round
+(so the richest bot takes the worse card when the team splits); ties go to the first combination in seat order,
 X before Y. A lone smart bot: X, unless the other three are unanimous, then Y.
 
 ## Room & registry (`wallstreet/room.py`)

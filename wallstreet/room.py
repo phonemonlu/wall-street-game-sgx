@@ -196,12 +196,15 @@ class Room:
         with self.lock:
             self._smart_bots_decide()
             record = self.game.reveal()
+            if self.game.phase is Phase.OVER:
+                self.timer_ends_at = None  # no more negotiating once the game is over
             self._bump()
             return record
 
     def next_round(self) -> None:
         with self.lock:
             self.game.next_round()
+            self.timer_ends_at = None  # the negotiation break ends when the next round opens
             self._bots_submit(self.seats.values())
             self._bump()
 
@@ -229,7 +232,8 @@ class Room:
         if not smart:
             return
         choices = {label: self.game.choice_of(label) for label in SEATS}
-        for label, card in smart_choices(choices, smart, self.game.round_no).items():  # type: ignore[arg-type]
+        picks = smart_choices(choices, smart, self.game.round_no, self.game.totals())  # type: ignore[arg-type]
+        for label, card in picks.items():
             self.game.submit(label, card)
 
     def _seat_view(self, seat: Seat) -> SeatView:
@@ -436,7 +440,7 @@ class RoomRegistry:
                 "rank": 0,
                 "group": snap.group_id,
                 "seat": player_label(snap.group_id, seat.label),
-                "name": seat.name,
+                "name": seat.name or player_label(snap.group_id, seat.label),
                 "bot": seat.is_bot,
                 "points": snap.totals[seat.label],
             }
@@ -463,7 +467,12 @@ def _export_group(snap: RoomSnapshot) -> dict:
         "phase": str(snap.phase),
         "group_total": snap.group_total,
         "seats": [
-            {"seat": player_label(gid, s.label), "name": s.name, "bot": s.is_bot, "total": snap.totals[s.label]}
+            {
+                "seat": player_label(gid, s.label),
+                "name": s.name or player_label(gid, s.label),  # a seat taken but never named
+                "bot": s.is_bot,
+                "total": snap.totals[s.label],
+            }
             for s in snap.seats
         ],
         "rounds": [

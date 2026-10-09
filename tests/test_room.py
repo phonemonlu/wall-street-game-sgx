@@ -754,3 +754,63 @@ def test_export_numbers_seats_across_groups(reg: RoomRegistry):
     assert g2["rounds"][0]["payoffs"] == {"P5": 30, "P6": -10, "P7": -10, "P8": -10}
 
 
+# -- timer ends with its break; smart bots share the sacrifice; unnamed seats ---------------------
+
+
+def test_timer_is_cancelled_when_the_next_round_starts():
+    clock = FakeClock()
+    reg = RoomRegistry(clock=clock)
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.reveal(1)
+    reg.start_timer(120, 1)
+    assert reg.snapshot(1).timer_ends_at == clock.now + 120
+    reg.next_round(1)
+    assert reg.snapshot(1).timer_ends_at is None
+
+
+def test_timer_is_cancelled_when_the_game_ends():
+    reg = RoomRegistry(rounds=2)
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.reveal(1)
+    reg.next_round(1)
+    reg.start_timer(60, 1)  # a timer started during the last round
+    reg.reveal(1)
+    snap = reg.snapshot(1)
+    assert snap.phase is Phase.OVER and snap.timer_ends_at is None
+
+
+def test_timer_survives_a_reveal_that_does_not_end_the_game(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.start_timer(60, 1)  # started while the round is open
+    reg.reveal(1)
+    assert reg.snapshot(1).timer_ends_at is not None
+
+
+def test_smart_bots_take_turns_with_the_worse_card(reg: RoomRegistry):
+    tokens = {seat: reg.join(1, seat, seat) for seat in ("P1", "P2")}
+    reg.fill_with_bots(1, "Smart")
+    reg.start(1)
+    sacrificed = []
+    for _ in range(4):
+        for token in tokens.values():
+            reg.submit(token, X)  # two X: the smart pair must split (X, Y) to keep the group at 0
+        record = reg.reveal(1)
+        assert sorted(str(record.choices[s]) for s in ("P3", "P4")) == ["X", "Y"]
+        sacrificed.append(next(s for s in ("P3", "P4") if record.choices[s] is Y))
+        reg.next_round(1)
+    assert sacrificed == ["P4", "P3", "P4", "P3"]  # the richer bot takes the Y each time
+    totals = reg.snapshot(1).totals
+    assert totals["P3"] == totals["P4"]
+
+
+def test_unnamed_seat_shows_its_seat_number_in_leaderboard_and_export(reg: RoomRegistry):
+    reg.take_seat(2, "P3")  # never named
+    row = next(r for r in reg.leaderboard() if r["group"] == 2)
+    assert (row["seat"], row["name"]) == ("P7", "P7")
+    seat = reg.export()["groups"][1]["seats"][2]
+    assert (seat["seat"], seat["name"]) == ("P7", "P7")

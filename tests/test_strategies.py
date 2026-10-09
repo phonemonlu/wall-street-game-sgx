@@ -106,3 +106,10 @@ def test_smart_bot_placeholder_is_a_valid_card():
     assert SmartBot().choose("P1", 1, []) in (X, Y)
 
 
+def test_team_split_gives_the_worse_card_to_the_richer_bot():
+    table = {"P1": X, "P2": X}  # the pair must split X/Y to keep the group at 0
+    assert smart_choices(table, ["P3", "P4"], 1) == {"P3": X, "P4": Y}  # tie: first seat gets X
+    assert smart_choices(table, ["P3", "P4"], 1, {"P3": 40, "P4": 0}) == {"P3": Y, "P4": X}
+    assert smart_choices(table, ["P3", "P4"], 1, {"P3": 0, "P4": 40}) == {"P3": X, "P4": Y}
+    # Fairness never costs the group or the team: same cards as before when nothing is split.
+    assert smart_choices({"P1": Y, "P2": Y}, ["P3", "P4"], 1, {"P3": 90, "P4": 0}) == {"P3": Y, "P4": Y}
