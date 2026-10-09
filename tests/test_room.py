@@ -1,0 +1,816 @@
+import json
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from wallstreet.errors import (
+    GameError,
+    InvalidTransition,
+    NotReady,
+    SeatTaken,
+    UnknownGroup,
+    UnknownSeat,
+)
+from wallstreet.game import Game, Phase
+from wallstreet.room import Room, RoomRegistry, Seat
+from wallstreet.scoring import SEATS, Card
+from wallstreet.strategies import STRATEGIES, RandomStrategy, SmartBot
+
+X, Y = Card.X, Card.Y
+
+pytestmark = pytest.mark.usefixtures("fixed_bots")  # deterministic "Always X" / "Always Y" bots
+
+REAL_GAME = ["XYXX", "YXYY", "YYXX", "XXXY", "XYYY", "YXXY", "XYYY", "YXXX", "XYYY", "XYYY"]
+
+
+class FakeClock:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def reg(clock: FakeClock) -> RoomRegistry:
+    registry = RoomRegistry(clock=clock)
+    registry.create_groups(3)
+    return registry
+
+
+def join_all(reg: RoomRegistry, group_id: int = 1) -> dict[str, str]:
+    return {seat: reg.join(group_id, seat, f"Player {seat}") for seat in SEATS}
+
+
+def submit_all(reg: RoomRegistry, tokens: dict[str, str], cards: str) -> None:
+    for seat, card in zip(SEATS, cards, strict=True):
+        reg.submit(tokens[seat], Card(card))
+
+
+# -- Seat ---------------------------------------------------------------------------------------
+
+
+def test_seat_properties():
+    assert Seat("P1").is_free and not Seat("P1").is_bot
+    human = Seat("P1", token="t", name="Ann")
+    assert not human.is_free and not human.is_bot
+    bot = Seat("P2", name="Bot", strategy=STRATEGIES["Always Y"]())
+    assert bot.is_bot and not bot.is_free
+
+
+# -- groups -------------------------------------------------------------------------------------
+
+
+def test_create_groups_and_ids(reg: RoomRegistry):
+    assert reg.group_ids() == [1, 2, 3]
+    assert reg.open_seats() == {g: list(SEATS) for g in (1, 2, 3)}
+    reg.create_groups(1)
+    assert reg.group_ids() == [1]
+
+
+@pytest.mark.parametrize("n", [0, -1, 201])
+def test_create_groups_bounds(n: int):
+    with pytest.raises(ValueError):
+        RoomRegistry().create_groups(n)
+
+
+def test_create_groups_200_allowed():
+    reg = RoomRegistry()
+    reg.create_groups(200)
+    assert len(reg.group_ids()) == 200
+
+
+def test_create_groups_replaces_game_and_clears_tokens(reg: RoomRegistry):
+    token = reg.join(1, "P1", "Ann")
+    reg.create_groups(2)
+    with pytest.raises(UnknownSeat):
+        reg.locate(token)
+    assert reg.snapshot(1).seats[0].is_free
+
+
+def test_reset(reg: RoomRegistry):
+    token = reg.join(1, "P1", "Ann")
+    reg.reset()
+    assert reg.group_ids() == [] and reg.snapshots() == [] and reg.export()["groups"] == []
+    with pytest.raises(UnknownSeat):
+        reg.locate(token)
+    with pytest.raises(UnknownGroup):
+        reg.snapshot(1)
+
+
+def test_unknown_group_everywhere(reg: RoomRegistry):
+    for call in (
+        lambda: reg.snapshot(9),
+        lambda: reg.join(9, "P1", "Ann"),
+        lambda: reg.fill_with_bots(9, "Always Y"),
+        lambda: reg.start(9),
+        lambda: reg.reveal(9),
+        lambda: reg.next_round(9),
+        lambda: reg.start_timer(10, 9),
+        lambda: reg.clear_timer(9),
+    ):
+        with pytest.raises(UnknownGroup):
+            call()
+
+
+def test_unknown_token_everywhere(reg: RoomRegistry):
+    for call in (
+        lambda: reg.locate("nope"),
+        lambda: reg.leave("nope"),
+        lambda: reg.submit("nope", X),
+        lambda: reg.my_choice("nope"),
+    ):
+        with pytest.raises(UnknownSeat):
+            call()
+
+
+# -- join / leave -------------------------------------------------------------------------------
+
+
+def test_join_returns_unique_token_and_locates(reg: RoomRegistry):
+    t1 = reg.join(1, "P1", "  Ann  ")
+    t2 = reg.join(2, "P1", "Bob")
+    assert t1 != t2 and len(t1) >= 16
+    assert reg.locate(t1) == (1, "P1")
+    assert reg.locate(t2) == (2, "P1")
+    seat = reg.snapshot(1).seats[0]
+    assert (seat.name, seat.is_free, seat.is_bot) == ("Ann", False, False)
+    assert reg.open_seats()[1] == ["P2", "P3", "P4"]
+
+
+def test_join_taken_seat(reg: RoomRegistry):
+    reg.join(1, "P1", "Ann")
+    with pytest.raises(SeatTaken):
+        reg.join(1, "P1", "Bob")
+    reg.fill_with_bots(1, "Always Y")
+    with pytest.raises(SeatTaken):
+        reg.join(1, "P2", "Bob")
+
+
+@pytest.mark.parametrize("name", ["", "   ", "\t"])
+def test_join_blank_name(reg: RoomRegistry, name: str):
+    with pytest.raises(GameError):
+        reg.join(1, "P1", name)
+    assert reg.snapshot(1).seats[0].is_free
+
+
+def test_join_unknown_seat(reg: RoomRegistry):
+    with pytest.raises(UnknownSeat):
+        reg.join(1, "P9", "Ann")
+
+
+def test_join_bumps_version(reg: RoomRegistry):
+    v = reg.snapshot(1).version
+    reg.join(1, "P1", "Ann")
+    assert reg.snapshot(1).version == v + 1
+    assert reg.snapshot(2).version == 0
+
+
+def test_leave_in_lobby_frees_seat(reg: RoomRegistry):
+    token = reg.join(1, "P1", "Ann")
+    v = reg.snapshot(1).version
+    reg.leave(token)
+    assert reg.snapshot(1).seats[0].is_free
+    assert reg.snapshot(1).version == v + 1
+    with pytest.raises(UnknownSeat):
+        reg.locate(token)
+    with pytest.raises(UnknownSeat):
+        reg.leave(token)
+    reg.join(1, "P1", "Bob")  # seat can be retaken
+
+
+def test_leave_after_start_raises(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    with pytest.raises(InvalidTransition):
+        reg.leave(tokens["P1"])
+    assert reg.locate(tokens["P1"]) == (1, "P1")
+
+
+def test_late_human_can_take_free_seat_and_start_needs_all(reg: RoomRegistry):
+    reg.join(1, "P1", "Ann")
+    reg.join(1, "P2", "Bob")
+    with pytest.raises(NotReady):
+        reg.start(1)
+    reg.join(1, "P3", "Cid")
+    reg.join(1, "P4", "Dee")
+    reg.start(1)
+    assert reg.snapshot(1).phase is Phase.OPEN
+
+
+def test_late_human_may_join_free_seat_after_game_started():
+    room = Room(1)
+    room.game.start()  # simulate a room that is OPEN with free seats
+    room.claim("P1", "Ann", "tok")
+    assert room.seats["P1"].name == "Ann"
+
+
+# -- bots ---------------------------------------------------------------------------------------
+
+
+def test_fill_with_bots_fills_free_seats_with_fresh_instances(reg: RoomRegistry):
+    reg.join(1, "P2", "Ann")
+    filled = reg.fill_with_bots(1, "Random")
+    assert filled == ["P1", "P3", "P4"]
+    snap = reg.snapshot(1)
+    assert [s.name for s in snap.seats] == ["Bot (Random)", "Ann", "Bot (Random)", "Bot (Random)"]
+    assert [s.is_bot for s in snap.seats] == [True, False, True, True]
+    room = reg._room(1)
+    strategies = [room.seats[label].strategy for label in filled]
+    assert all(isinstance(s, RandomStrategy) for s in strategies)
+    assert len({id(s) for s in strategies}) == 3
+    assert reg.fill_with_bots(1, "Always X") == []
+    assert reg.open_seats()[1] == []
+
+
+def test_fill_with_bots_unknown_strategy(reg: RoomRegistry):
+    with pytest.raises(GameError):
+        reg.fill_with_bots(1, "Nope")
+    assert reg.open_seats()[1] == list(SEATS)
+
+
+def test_fill_with_bots_version(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")
+    v = reg.snapshot(1).version
+    assert v == 1
+    reg.fill_with_bots(1, "Always Y")  # nothing to fill: no change
+    assert reg.snapshot(1).version == v
+
+
+def test_bots_submit_when_round_opens(reg: RoomRegistry):
+    tokens = {"P1": reg.join(1, "P1", "Ann")}
+    reg.fill_with_bots(1, "Always X")
+    assert not any(s.submitted for s in reg.snapshot(1).seats)  # nothing submitted in LOBBY
+    reg.start(1)
+    assert [s.submitted for s in reg.snapshot(1).seats] == [False, True, True, True]
+    reg.submit(tokens["P1"], Y)
+    record = reg.reveal(1)
+    assert dict(record.choices) == {"P1": Y, "P2": X, "P3": X, "P4": X}
+    assert not any(s.submitted for s in reg.snapshot(1).seats)
+    reg.next_round(1)
+    assert [s.submitted for s in reg.snapshot(1).seats] == [False, True, True, True]
+
+
+def test_bot_added_to_open_round_submits_immediately():
+    room = Room(1)
+    room.claim("P1", "Ann", "tok")
+    room.game.start()  # OPEN with free seats (not reachable via registry.start)
+    room.add_bots("Always X")
+    assert room.game.pending_seats() == ["P1"]
+    assert room.game.choice_of("P2") is X
+
+
+def test_replace_with_bot_in_lobby_invalidates_token(reg: RoomRegistry):
+    token = reg.join(1, "P2", "Ann")
+    v = reg.snapshot(1).version
+    reg.replace_with_bot(1, "P2", "Smart")
+    seat = reg.snapshot(1).seats[1]
+    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Smart)", True, False)
+    assert reg.snapshot(1).version == v + 1
+    for action in (lambda: reg.locate(token), lambda: reg.submit(token, X), lambda: reg.leave(token)):
+        with pytest.raises(UnknownSeat):
+            action()
+    assert token not in reg._tokens
+
+
+def test_replace_with_bot_in_open_round_submits_immediately(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    reg.submit(tokens["P1"], Y)
+    reg.replace_with_bot(1, "P3", "Always X")
+    assert [s.submitted for s in reg.snapshot(1).seats] == [True, False, True, False]
+    with pytest.raises(UnknownSeat):
+        reg.submit(tokens["P3"], Y)
+    for seat in ("P2", "P4"):
+        reg.submit(tokens[seat], Y)
+    record = reg.reveal(1)
+    assert record.choices["P3"] is X
+    reg.next_round(1)  # the bot keeps playing in later rounds
+    assert [s.submitted for s in reg.snapshot(1).seats] == [False, False, True, False]
+
+
+def test_replace_with_bot_overrides_a_humans_pending_choice(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    reg.submit(tokens["P1"], X)
+    reg.replace_with_bot(1, "P1", "Always Y")
+    assert reg._room(1).game.choice_of("P1") is Y
+
+
+@pytest.mark.parametrize("phase", ["revealed", "over"])
+def test_replace_with_bot_in_later_phases(phase: str):
+    reg = RoomRegistry(rounds=1 if phase == "over" else 10)
+    reg.create_groups(1)
+    tokens = join_all(reg)
+    reg.start(1)
+    submit_all(reg, tokens, "XYYY")
+    reg.reveal(1)
+    assert reg.snapshot(1).phase is Phase(phase)
+    reg.replace_with_bot(1, "P1", "Random")
+    assert reg.snapshot(1).seats[0].is_bot
+    assert dict(reg.snapshot(1).totals)["P1"] == 30  # history is untouched
+    with pytest.raises(UnknownSeat):
+        reg.my_choice(tokens["P1"])
+
+
+def test_replace_with_bot_free_seat_and_errors(reg: RoomRegistry):
+    reg.replace_with_bot(1, "P4", "Always Y")
+    assert reg.snapshot(1).seats[3].is_bot
+    v = reg.snapshot(1).version
+    with pytest.raises(GameError, match="already a bot"):
+        reg.replace_with_bot(1, "P4", "Always X")
+    with pytest.raises(GameError):
+        reg.replace_with_bot(1, "P1", "Nope")
+    with pytest.raises(UnknownSeat):
+        reg.replace_with_bot(1, "P9", "Always Y")
+    with pytest.raises(UnknownGroup):
+        reg.replace_with_bot(99, "P1", "Always Y")
+    assert reg.snapshot(1).version == v
+    assert reg.snapshot(1).seats[0].is_free
+
+
+def test_all_bot_strategies_play_full_games(reg: RoomRegistry):
+    for name in STRATEGIES:
+        reg.create_groups(1)
+        reg.fill_with_bots(1, name)
+        reg.start(1)
+        for _ in range(9):
+            reg.reveal(1)
+            reg.next_round(1)
+        reg.reveal(1)
+        snap = reg.snapshot(1)
+        assert snap.phase is Phase.OVER and len(snap.history) == 10
+
+
+def test_smart_bots_reply_to_final_cards_at_reveal(reg: RoomRegistry):
+    token = reg.join(1, "P1", "Ann")
+    reg.fill_with_bots(1, "Smart")
+    reg.start(1)
+    assert reg.snapshot(1).seats[1].submitted  # smart seats never block the reveal
+    reg.submit(token, Y)
+    reg.submit(token, X)  # Ann changes her mind: only the final card counts
+    record = reg.reveal(1)
+    # Against one X the team keeps the group at 0 (not -40) and takes the most points: X, X, Y.
+    assert dict(record.choices) == {"P1": X, "P2": X, "P3": X, "P4": Y}
+    reg.next_round(1)
+    reg.submit(token, Y)
+    assert dict(reg.reveal(1).choices) == {"P1": Y, "P2": Y, "P3": Y, "P4": Y}
+
+
+def test_smart_bot_waits_for_humans(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.replace_with_bot(1, "P4", "Smart")
+    reg.start(1)
+    for label in ("P1", "P2"):
+        reg.submit(tokens[label], Y)
+    with pytest.raises(NotReady, match="P3"):
+        reg.reveal(1)
+    reg.submit(tokens["P3"], Y)
+    assert reg.reveal(1).choices["P4"] is Y  # the others all played Y: protect the +40
+
+
+def test_smart_bot_replacing_a_human_mid_round(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.start(1)
+    submit_all(reg, tokens, "XYYY")
+    reg.replace_with_bot(1, "P1", "Smart")  # overrides P1's pending X
+    assert isinstance(reg._room(1).seats["P1"].strategy, SmartBot)
+    assert reg.reveal(1).choices["P1"] is Y  # the others all played Y
+
+
+def test_smart_bots_see_random_bots(reg: RoomRegistry):
+    reg.replace_with_bot(1, "P1", "Smart")
+    reg.fill_with_bots(1, "Random")
+    reg.start(1)
+    for _ in range(9):
+        record = reg.reveal(1)
+        others = [record.choices[s] for s in SEATS[1:]]
+        expected = Y if len(set(others)) == 1 else X
+        assert record.choices["P1"] is expected
+        reg.next_round(1)
+
+
+# -- play ---------------------------------------------------------------------------------------
+
+
+def test_submit_and_my_choice(reg: RoomRegistry):
+    tokens = join_all(reg)
+    with pytest.raises(InvalidTransition):
+        reg.submit(tokens["P1"], X)  # LOBBY
+    reg.start(1)
+    assert reg.my_choice(tokens["P1"]) is None
+    reg.submit(tokens["P1"], X)
+    assert reg.my_choice(tokens["P1"]) is X
+    reg.submit(tokens["P1"], Y)  # overwrite before reveal
+    assert reg.my_choice(tokens["P1"]) is Y
+    assert reg.my_choice(tokens["P2"]) is None
+
+
+def test_reveal_and_next_round_errors(reg: RoomRegistry):
+    tokens = join_all(reg)
+    with pytest.raises(InvalidTransition):
+        reg.reveal(1)
+    reg.start(1)
+    with pytest.raises(InvalidTransition):
+        reg.start(1)
+    with pytest.raises(InvalidTransition):
+        reg.next_round(1)
+    reg.submit(tokens["P1"], X)
+    with pytest.raises(NotReady):
+        reg.reveal(1)
+
+
+def test_failed_mutation_does_not_bump_version(reg: RoomRegistry):
+    v = reg.snapshot(1).version
+    for call in (lambda: reg.start(1), lambda: reg.reveal(1), lambda: reg.next_round(1)):
+        with pytest.raises(GameError):
+            call()
+    assert reg.snapshot(1).version == v
+
+
+def test_every_mutation_bumps_version(reg: RoomRegistry):
+    versions = [reg.snapshot(1).version]
+
+    def step(action):
+        action()
+        versions.append(reg.snapshot(1).version)
+
+    tokens = {}
+    for seat in SEATS:
+        step(lambda seat=seat: tokens.setdefault(seat, reg.join(1, seat, seat)))
+    step(lambda: reg.start(1))
+    for seat in SEATS:
+        step(lambda seat=seat: reg.submit(tokens[seat], X))
+    step(lambda: reg.start_timer(30, 1))
+    step(lambda: reg.reveal(1))
+    step(lambda: reg.clear_timer(1))
+    step(lambda: reg.next_round(1))
+    assert all(b == a + 1 for a, b in zip(versions, versions[1:]))
+
+
+def test_full_game_via_tokens_matches_game(reg: RoomRegistry):
+    tokens = join_all(reg, 2)
+    reference = Game()
+    reg.start(2)
+    reference.start()
+    for round_no, cards in enumerate(REAL_GAME, start=1):
+        snap = reg.snapshot(2)
+        assert (snap.phase, snap.round_no) == (Phase.OPEN, round_no)
+        submit_all(reg, tokens, cards)
+        for seat, card in zip(SEATS, cards, strict=True):
+            reference.submit(seat, Card(card))
+        record = reg.reveal(2)
+        assert record == reference.reveal()
+        if round_no < 10:
+            reg.next_round(2)
+            reference.next_round()
+    snap = reg.snapshot(2)
+    assert snap.phase is Phase.OVER
+    assert dict(snap.totals) == reference.totals() == {"P1": 270, "P2": -90, "P3": -50, "P4": -130}
+    assert snap.group_total == reference.group_total() == 0
+    assert snap.history == reference.history
+    with pytest.raises(InvalidTransition):
+        reg.next_round(2)
+    # other groups untouched
+    assert reg.snapshot(1).phase is Phase.LOBBY
+
+
+# -- snapshot -----------------------------------------------------------------------------------
+
+
+def test_snapshot_lobby_defaults(reg: RoomRegistry):
+    snap = reg.snapshot(1)
+    assert snap.group_id == 1 and snap.phase is Phase.LOBBY and snap.round_no == 0
+    assert snap.rounds == 10 and snap.multiplier == 1 and snap.next_multiplier == 1
+    assert snap.history == () and dict(snap.totals) == dict.fromkeys(SEATS, 0)
+    assert snap.group_total == 0 and snap.timer_ends_at is None and snap.version == 0
+    assert [s.label for s in snap.seats] == list(SEATS)
+
+
+def test_snapshot_multipliers(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    seen = []
+    for round_no in range(1, 11):
+        snap = reg.snapshot(1)
+        seen.append((snap.round_no, snap.multiplier, snap.next_multiplier))
+        reg.reveal(1)
+        if round_no < 10:
+            reg.next_round(1)
+    assert seen[3] == (4, 1, 3)
+    assert seen[4] == (5, 3, 1)
+    assert seen[6] == (7, 1, 5)
+    assert seen[8] == (9, 1, 10)
+    assert seen[9] == (10, 10, 1)
+
+
+def test_snapshot_never_exposes_unrevealed_cards(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    reg.submit(tokens["P1"], X)
+    snap = reg.snapshot(1)
+    assert [s.submitted for s in snap.seats] == [True, False, False, False]
+    assert snap.history == ()
+    text = repr(snap)
+    assert "Card" not in text and "'X'" not in text
+
+
+def test_snapshot_is_immutable(reg: RoomRegistry):
+    snap = reg.snapshot(1)
+    with pytest.raises(FrozenInstanceError):
+        snap.version = 5  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        snap.totals["P1"] = 5  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        snap.seats[0].name = "x"  # type: ignore[misc]
+
+
+def test_snapshot_is_detached_from_later_changes(reg: RoomRegistry):
+    before = reg.snapshot(1)
+    reg.fill_with_bots(1, "Always X")
+    reg.start(1)
+    reg.reveal(1)
+    assert before.phase is Phase.LOBBY and before.history == () and before.seats[0].is_free
+
+
+def test_snapshots_in_group_order(reg: RoomRegistry):
+    assert [s.group_id for s in reg.snapshots()] == [1, 2, 3]
+
+
+# -- *_all --------------------------------------------------------------------------------------
+
+
+def test_start_reveal_next_all_report_skipped(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")
+    reg.fill_with_bots(2, "Always X")
+    skipped = reg.start_all()
+    assert list(skipped) == [3] and "free seats" in skipped[3]
+    assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.OPEN
+    skipped = reg.reveal_all()
+    assert list(skipped) == [3]
+    assert reg.snapshot(1).totals["P1"] == 10 and reg.snapshot(2).totals["P1"] == -10
+    skipped = reg.next_all()
+    assert list(skipped) == [3]
+    assert reg.snapshot(1).round_no == 2
+
+
+def test_reveal_all_skips_pending(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.fill_with_bots(2, "Always Y")
+    reg.fill_with_bots(3, "Always Y")
+    assert reg.start_all() == {}
+    skipped = reg.reveal_all()
+    assert list(skipped) == [1] and "P1" in skipped[1]
+    reg.submit(tokens["P1"], X)
+    assert reg.my_choice(tokens["P1"]) is X
+
+
+# -- timer --------------------------------------------------------------------------------------
+
+
+def test_timer_single_group(reg: RoomRegistry, clock: FakeClock):
+    reg.start_timer(60, 2)
+    assert reg.snapshot(2).timer_ends_at == 1060.0
+    assert reg.snapshot(1).timer_ends_at is None
+    clock.now = 2000.0
+    reg.start_timer(30, 2)
+    assert reg.snapshot(2).timer_ends_at == 2030.0
+    reg.clear_timer(2)
+    assert reg.snapshot(2).timer_ends_at is None
+
+
+def test_timer_all_groups(reg: RoomRegistry, clock: FakeClock):
+    reg.start_timer(45)
+    assert {s.timer_ends_at for s in reg.snapshots()} == {1045.0}
+    reg.clear_timer()
+    assert {s.timer_ends_at for s in reg.snapshots()} == {None}
+
+
+@pytest.mark.parametrize("seconds", [0, -5])
+def test_timer_must_be_positive(reg: RoomRegistry, seconds: int):
+    with pytest.raises(ValueError):
+        reg.start_timer(seconds)
+
+
+def test_default_clock_is_wall_time():
+    import time
+
+    reg = RoomRegistry()
+    reg.create_groups(1)
+    before = time.time()
+    reg.start_timer(10)
+    assert before + 10 <= reg.snapshot(1).timer_ends_at <= time.time() + 10
+
+
+# -- leaderboards & export ----------------------------------------------------------------------
+
+
+def play_bots_to_end(reg: RoomRegistry, group_id: int) -> None:
+    reg.start(group_id)
+    while True:
+        reg.reveal(group_id)
+        if reg.snapshot(group_id).phase is Phase.OVER:
+            return
+        reg.next_round(group_id)
+
+
+def test_leaderboard_competition_ranking(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")  # each seat: 10 * (7 + 3 + 5 + 10) = 250
+    reg.fill_with_bots(2, "Always X")  # each seat: -250
+    reg.join(3, "P1", "Ann")
+    for g in (1, 2):
+        play_bots_to_end(reg, g)
+    rows = reg.leaderboard()
+    assert len(rows) == 9  # free seats are left out
+    assert [r["rank"] for r in rows] == [1, 1, 1, 1, 5, 6, 6, 6, 6]
+    assert [(r["group"], r["seat"], r["points"]) for r in rows[:5]] == [
+        (1, "P1", 250), (1, "P2", 250), (1, "P3", 250), (1, "P4", 250), (3, "P9", 0)  # numbered across groups
+    ]
+    assert rows[4] == {"rank": 5, "group": 3, "seat": "P9", "name": "Ann", "bot": False, "points": 0}
+    assert rows[0]["name"] == "Bot (Always Y)" and rows[0]["bot"] is True
+    assert list(rows[0]) == ["rank", "group", "seat", "name", "bot", "points"]
+
+
+def test_group_leaderboard(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always X")
+    reg.fill_with_bots(3, "Always Y")
+    play_bots_to_end(reg, 1)
+    play_bots_to_end(reg, 3)
+    assert reg.group_leaderboard() == [
+        {"rank": 1, "group": 3, "points": 1000},
+        {"rank": 2, "group": 2, "points": 0},
+        {"rank": 3, "group": 1, "points": -1000},
+    ]
+
+
+def test_group_leaderboard_ties(reg: RoomRegistry):
+    rows = reg.group_leaderboard()
+    assert [(r["rank"], r["group"]) for r in rows] == [(1, 1), (1, 2), (1, 3)]
+
+
+def test_export_is_json_serialisable(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.fill_with_bots(2, "Random")
+    reg.start(1)
+    submit_all(reg, tokens, "XYXX")
+    reg.reveal(1)
+    data = json.loads(json.dumps(reg.export()))
+    assert data["rounds"] == 10
+    assert [g["group"] for g in data["groups"]] == [1, 2, 3]
+    g1 = data["groups"][0]
+    assert g1["seats"][0] == {"seat": "P1", "name": "Player P1", "bot": False, "total": 10}
+    assert g1["rounds"] == [
+        {
+            "round": 1,
+            "choices": {"P1": "X", "P2": "Y", "P3": "X", "P4": "X"},
+            "payoffs": {"P1": 10, "P2": -30, "P3": 10, "P4": 10},
+            "multiplier": 1,
+            "group_total": 0,
+        }
+    ]
+    assert type(g1["rounds"][0]["choices"]["P1"]) is str
+    assert data["groups"][1]["seats"][0]["bot"] is True
+    assert data["groups"][1]["rounds"] == []
+    assert type(reg.export()["groups"][0]["rounds"][0]["choices"]["P1"]) is str
+
+
+def test_custom_rounds():
+    reg = RoomRegistry(rounds=3)
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    play_bots_to_end(reg, 1)
+    snap = reg.snapshot(1)
+    assert snap.rounds == 3 and len(snap.history) == 3 and snap.totals["P1"] == 30
+
+
+# -- seat first, name second ----------------------------------------------------------------------
+
+
+def test_take_seat_then_name_it(reg: RoomRegistry):
+    token = reg.take_seat(1, "P3")
+    assert reg.locate(token) == (1, "P3")
+    seat = reg.snapshot(1).seats[2]
+    assert (seat.name, seat.is_free, seat.is_bot) == ("", False, False)  # taken, not named yet
+    assert "P3" not in reg.open_seats()[1]
+    v = reg.snapshot(1).version
+    reg.rename(token, "  Ann  ")
+    assert reg.snapshot(1).seats[2].name == "Ann"
+    assert reg.snapshot(1).version > v  # other pages see the new name
+    with pytest.raises(SeatTaken):
+        reg.take_seat(1, "P3")
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * 31])
+def test_rename_rejects_bad_names(reg: RoomRegistry, name: str):
+    token = reg.take_seat(1, "P1")
+    with pytest.raises(GameError):
+        reg.rename(token, name)
+    assert reg.snapshot(1).seats[0].name == ""
+
+
+def test_rename_allowed_in_lobby_then_locked(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.rename(tokens["P1"], "Ann")  # lobby: fix a typo
+    assert reg.snapshot(1).seats[0].name == "Ann"
+    reg.start(1)
+    with pytest.raises(InvalidTransition, match="locked"):
+        reg.rename(tokens["P1"], "Annie")
+    assert reg.snapshot(1).seats[0].name == "Ann"
+
+
+def test_unnamed_player_can_still_name_after_start(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.leave(tokens["P4"])
+    late = reg.take_seat(1, "P4")
+    reg.start(1)  # the host started before P4 typed a name
+    reg.rename(late, "Dana")
+    assert reg.snapshot(1).seats[3].name == "Dana"
+    with pytest.raises(InvalidTransition):
+        reg.rename(late, "Dana 2")
+
+
+def test_rename_and_take_seat_errors(reg: RoomRegistry):
+    with pytest.raises(UnknownSeat):
+        reg.rename("made-up", "Ann")
+    with pytest.raises(UnknownGroup):
+        reg.take_seat(99, "P1")
+    with pytest.raises(UnknownSeat):
+        reg.take_seat(1, "P9")
+
+
+def test_export_numbers_seats_across_groups(reg: RoomRegistry):
+    tokens = join_all(reg, 2)
+    reg.start(2)
+    submit_all(reg, tokens, "XYYY")
+    reg.reveal(2)
+    g2 = reg.export()["groups"][1]
+    assert [seat["seat"] for seat in g2["seats"]] == ["P5", "P6", "P7", "P8"]
+    assert g2["rounds"][0]["choices"] == {"P5": "X", "P6": "Y", "P7": "Y", "P8": "Y"}
+    assert g2["rounds"][0]["payoffs"] == {"P5": 30, "P6": -10, "P7": -10, "P8": -10}
+
+
+# -- timer ends with its break; smart bots share the sacrifice; unnamed seats ---------------------
+
+
+def test_timer_is_cancelled_when_the_next_round_starts():
+    clock = FakeClock()
+    reg = RoomRegistry(clock=clock)
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.reveal(1)
+    reg.start_timer(120, 1)
+    assert reg.snapshot(1).timer_ends_at == clock.now + 120
+    reg.next_round(1)
+    assert reg.snapshot(1).timer_ends_at is None
+
+
+def test_timer_is_cancelled_when_the_game_ends():
+    reg = RoomRegistry(rounds=2)
+    reg.create_groups(1)
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.reveal(1)
+    reg.next_round(1)
+    reg.start_timer(60, 1)  # a timer started during the last round
+    reg.reveal(1)
+    snap = reg.snapshot(1)
+    assert snap.phase is Phase.OVER and snap.timer_ends_at is None
+
+
+def test_timer_survives_a_reveal_that_does_not_end_the_game(reg: RoomRegistry):
+    reg.fill_with_bots(1, "Always Y")
+    reg.start(1)
+    reg.start_timer(60, 1)  # started while the round is open
+    reg.reveal(1)
+    assert reg.snapshot(1).timer_ends_at is not None
+
+
+def test_smart_bots_take_turns_with_the_worse_card(reg: RoomRegistry):
+    tokens = {seat: reg.join(1, seat, seat) for seat in ("P1", "P2")}
+    reg.fill_with_bots(1, "Smart")
+    reg.start(1)
+    sacrificed = []
+    for _ in range(4):
+        for token in tokens.values():
+            reg.submit(token, X)  # two X: the smart pair must split (X, Y) to keep the group at 0
+        record = reg.reveal(1)
+        assert sorted(str(record.choices[s]) for s in ("P3", "P4")) == ["X", "Y"]
+        sacrificed.append(next(s for s in ("P3", "P4") if record.choices[s] is Y))
+        reg.next_round(1)
+    assert sacrificed == ["P4", "P3", "P4", "P3"]  # the richer bot takes the Y each time
+    totals = reg.snapshot(1).totals
+    assert totals["P3"] == totals["P4"]
+
+
+def test_unnamed_seat_shows_its_seat_number_in_leaderboard_and_export(reg: RoomRegistry):
+    reg.take_seat(2, "P3")  # never named
+    row = next(r for r in reg.leaderboard() if r["group"] == 2)
+    assert (row["seat"], row["name"]) == ("P7", "P7")
+    seat = reg.export()["groups"][1]["seats"][2]
+    assert (seat["seat"], seat["name"]) == ("P7", "P7")
