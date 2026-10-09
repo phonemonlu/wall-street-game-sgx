@@ -186,8 +186,8 @@ def test_join_view_without_groups():
     assert not at.button
 
 
-def test_host_creates_groups_and_join_view_lists_free_seats():
-    host = run(role="host")
+def test_host_creates_groups_and_join_view_lists_every_seat():
+    host = run_host()
     host.number_input(key="setup_groups").set_value(2)
     host.button(key="create_groups").click().run()
     assert not host.exception
@@ -195,41 +195,132 @@ def test_host_creates_groups_and_join_view_lists_free_seats():
     assert [tab.label for tab in host.tabs] == ["Group 1", "Group 2", "Leaderboard"]
 
     join = run()
-    assert join.selectbox(key="join_group").options == ["Group 1 · 4 free seat(s)", "Group 2 · 4 free seat(s)"]
-    assert join.radio(key="join_seat_1").options == list(SEATS)
+    assert texts(join.subheader) == ["Pick a seat"]
+    assert [b.label for b in join.button] == [*SEATS, *SEATS]
+    assert not any(b.disabled for b in join.button)
     app_registry().join(1, "P1", "Ann")
+    app_registry().take_seat(2, "P4")
     join = run()
-    assert join.radio(key="join_seat_1").options == ["P1 (taken)", "P2", "P3", "P4"]
-    assert join.radio(key="join_seat_1").value == "P2"  # first free seat preselected
+    assert join.button(key="join_1_P1").label == "P1 · Ann" and join.button(key="join_1_P1").disabled
+    assert join.button(key="join_2_P4").label == "P4 · no name yet" and join.button(key="join_2_P4").disabled
+    assert not join.button(key="join_1_P2").disabled
 
 
-def test_player_joins_and_token_lands_in_query_params():
+def test_player_takes_seat_then_names_it():
     run().run()  # warm the cache
     app_registry().create_groups(1)
     at = run()
-    at.radio(key="join_seat_1").set_value("P2")
-    at.text_input(key="join_name").input("Ann")
-    at.button(key="join_button").click().run()
+    at.button(key="join_1_P2").click().run()
     assert not at.exception
     token = at.query_params["seat"]
     token = token[-1] if isinstance(token, list) else token  # older AppTest returns a list
     assert app_registry().locate(token) == (1, "P2")
     assert texts(at.header) == ["P2 | Group 1"]
+    assert "pick_X" not in button_keys(at)  # no playing before naming
+    assert app_registry().snapshot(1).seats[1].name == ""
+
+    at.button(key="FormSubmitter:name_form-Save name").click().run()  # blank name
+    assert texts(at.error) == ["Please enter your name."]
+    at.text_input(key="name_input").input("Ann")
+    at.button(key="FormSubmitter:name_form-Save name").click().run()
+    assert not at.exception
+    assert app_registry().snapshot(1).seats[1].name == "Ann"
     assert "Ann" in at.caption[0].value
+    assert at.button(key="pick_X")
 
 
-def test_join_errors_are_friendly():
+def test_player_can_rename_in_lobby_only():
     run()
-    app_registry().create_groups(1)
+    reg = app_registry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, f"Player {seat}") for seat in SEATS}
+    at = run(seat=tokens["P1"])
+    assert [e.label for e in at.expander] == ["Change name"]
+    at.text_input(key="name_input").input("Ann")
+    at.button(key="FormSubmitter:name_form-Save name").click().run()
+    assert reg.snapshot(1).seats[0].name == "Ann"
+    reg.start(1)
+    at.run()
+    assert not at.expander  # names are locked once the game starts
+
+
+def test_player_can_pick_another_seat_before_naming():
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
     at = run()
-    at.button(key="join_button").click().run()  # blank name
-    assert texts(at.error) == ["Could not join: Please enter your name."]
-    app_registry().join(1, "P1", "Bob")  # someone else grabs P1 meanwhile
-    at.text_input(key="join_name").input("Ann")
-    at.radio(key="join_seat_1").set_value("P1")
-    at.button(key="join_button").click().run()
-    assert any("already taken" in text for text in texts(at.error))
+    at.button(key="join_1_P3").click().run()
+    at.button(key="change_seat").click().run()
+    assert not at.exception
     assert "seat" not in at.query_params
+    assert reg.open_seats()[1] == list(SEATS)
+    assert texts(at.subheader) == ["Pick a seat"]
+
+
+def test_seat_taken_meanwhile_is_reported():
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    at = run()
+    reg.join(1, "P1", "Bob")  # someone else grabs P1 after this page was drawn
+    at.button(key="join_1_P1").click().run()
+    # The redraw shows P1 as taken and disables it, so the click is dropped: no seat, no crash.
+    assert not at.exception
+    assert "seat" not in at.query_params
+    assert at.button(key="join_1_P1").label == "P1 · Bob" and at.button(key="join_1_P1").disabled
+    assert reg.snapshot(1).seats[0].name == "Bob"
+
+
+def test_take_seat_race_shows_friendly_error(monkeypatch: pytest.MonkeyPatch):
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    at = run()
+    real_take_seat = reg.take_seat
+
+    def lose_the_race(group_id: int, seat: str) -> str:
+        reg.join(group_id, seat, "Bob")  # Bob wins between the redraw and our claim
+        return real_take_seat(group_id, seat)
+
+    monkeypatch.setattr(reg, "take_seat", lose_the_race)
+    at.button(key="join_1_P1").click().run()
+    assert any("Could not take P1 in Group 1" in text for text in texts(at.error))
+    assert "seat" not in at.query_params
+
+
+def test_player_sees_all_groups_tab_with_every_board():
+    run()
+    reg = app_registry()
+    reg.create_groups(3)
+    tokens = {g: {seat: reg.join(g, seat, f"G{g}{seat}") for seat in SEATS} for g in (1, 2, 3)}
+    play(reg, tokens[1], ["XYYY"], group_id=1)
+    play(reg, tokens[2], ["YYYY", "XXYY"], group_id=2)
+    reg.start(3)
+    reg.submit(tokens[3]["P1"], Card.X)  # unrevealed: must not show anywhere
+    at = run(seat=tokens[1]["P2"])
+    assert not at.exception
+    assert [t.label for t in at.tabs] == ["My group", "All groups"]
+    summary = at.dataframe[1].value  # [0] is my group's board
+    assert summary.to_dict("records") == [
+        {"Group": 1, "Status": "Round 1 of 10", "Group total": 0},
+        {"Group": 2, "Status": "Round 2 of 10", "Group total": 40},
+        {"Group": 3, "Status": "Round 1 of 10", "Group total": 0},
+    ]
+    assert [e.label for e in at.expander] == ["Group 1 (your group)", "Group 2", "Group 3"]
+    boards = [df.value for df in at.dataframe[2:]]
+    assert boards[0].to_dict("records") == [{"RD": 1, "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"}]
+    assert list(boards[1]["P1"]) == ["Y +10", "X +20"]
+    assert len(boards) == 2  # group 3 has nothing revealed
+    assert "No rounds revealed yet." in texts(at.caption)
+    assert "P1 G2P1 · P2 G2P2 · P3 G2P3 · P4 G2P4" in texts(at.caption)
+
+
+def test_single_group_has_no_all_groups_tab():
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    at = run(seat=reg.join(1, "P1", "Ann"))
+    assert not at.tabs
 
 
 # -- host ---------------------------------------------------------------------------------------

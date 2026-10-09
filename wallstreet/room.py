@@ -26,6 +26,7 @@ from wallstreet.scoring import SEATS, Card, multiplier
 from wallstreet.strategies import STRATEGIES, SmartBot, Strategy, smart_choices
 
 MAX_GROUPS = 200
+MAX_NAME_LEN = 30
 
 
 @dataclass
@@ -125,6 +126,15 @@ class Room:
             if not seat.is_free:
                 raise SeatTaken(f"Seat {label} in group {self.group_id} is already taken.")
             seat.token, seat.name = token, name
+            self._bump()
+
+    def rename(self, label: str, token: str, name: str) -> None:
+        """Set the seat's name: any time while unnamed, otherwise only before the game starts."""
+        with self.lock:
+            seat = self.seat_for_token(label, token)
+            if seat.name and self.game.phase is not Phase.LOBBY:
+                raise InvalidTransition("Names are locked once the game has started.")
+            seat.name = name
             self._bump()
 
     def release(self, label: str, token: str) -> None:
@@ -235,6 +245,15 @@ class Room:
         self.version += 1
 
 
+def _clean_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise GameError("Please enter your name.")
+    if len(name) > MAX_NAME_LEN:
+        raise GameError(f"Names can be at most {MAX_NAME_LEN} characters.")
+    return name
+
+
 def _strategy_factory(strategy_name: str) -> Callable[[], Strategy]:
     factory = STRATEGIES.get(strategy_name)
     if factory is None:
@@ -321,9 +340,17 @@ class RoomRegistry:
     # -- players ------------------------------------------------------------------------------
 
     def join(self, group_id: int, seat: str, name: str) -> str:
-        name = name.strip()
-        if not name:
-            raise GameError("Please enter your name.")
+        return self._claim(group_id, seat, _clean_name(name))
+
+    def take_seat(self, group_id: int, seat: str) -> str:
+        """Claim a free seat before choosing a name (see ``rename``); returns the seat token."""
+        return self._claim(group_id, seat, "")
+
+    def rename(self, token: str, name: str) -> None:
+        room, label = self._by_token(token)
+        room.rename(label, token, _clean_name(name))
+
+    def _claim(self, group_id: int, seat: str, name: str) -> str:
         room = self._room(group_id)
         token = secrets.token_urlsafe(16)
         with room.lock:

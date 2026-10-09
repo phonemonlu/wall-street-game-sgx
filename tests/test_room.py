@@ -686,3 +686,60 @@ def test_custom_rounds():
     play_bots_to_end(reg, 1)
     snap = reg.snapshot(1)
     assert snap.rounds == 3 and len(snap.history) == 3 and snap.totals["P1"] == 30
+
+
+# -- seat first, name second ----------------------------------------------------------------------
+
+
+def test_take_seat_then_name_it(reg: RoomRegistry):
+    token = reg.take_seat(1, "P3")
+    assert reg.locate(token) == (1, "P3")
+    seat = reg.snapshot(1).seats[2]
+    assert (seat.name, seat.is_free, seat.is_bot) == ("", False, False)  # taken, not named yet
+    assert "P3" not in reg.open_seats()[1]
+    v = reg.snapshot(1).version
+    reg.rename(token, "  Ann  ")
+    assert reg.snapshot(1).seats[2].name == "Ann"
+    assert reg.snapshot(1).version > v  # other pages see the new name
+    with pytest.raises(SeatTaken):
+        reg.take_seat(1, "P3")
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * 31])
+def test_rename_rejects_bad_names(reg: RoomRegistry, name: str):
+    token = reg.take_seat(1, "P1")
+    with pytest.raises(GameError):
+        reg.rename(token, name)
+    assert reg.snapshot(1).seats[0].name == ""
+
+
+def test_rename_allowed_in_lobby_then_locked(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.rename(tokens["P1"], "Ann")  # lobby: fix a typo
+    assert reg.snapshot(1).seats[0].name == "Ann"
+    reg.start(1)
+    with pytest.raises(InvalidTransition, match="locked"):
+        reg.rename(tokens["P1"], "Annie")
+    assert reg.snapshot(1).seats[0].name == "Ann"
+
+
+def test_unnamed_player_can_still_name_after_start(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.leave(tokens["P4"])
+    late = reg.take_seat(1, "P4")
+    reg.start(1)  # the host started before P4 typed a name
+    reg.rename(late, "Dana")
+    assert reg.snapshot(1).seats[3].name == "Dana"
+    with pytest.raises(InvalidTransition):
+        reg.rename(late, "Dana 2")
+
+
+def test_rename_and_take_seat_errors(reg: RoomRegistry):
+    with pytest.raises(UnknownSeat):
+        reg.rename("made-up", "Ann")
+    with pytest.raises(UnknownGroup):
+        reg.take_seat(99, "P1")
+    with pytest.raises(UnknownSeat):
+        reg.take_seat(1, "P9")
+
+

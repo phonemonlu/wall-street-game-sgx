@@ -193,13 +193,20 @@ def check_login(settings: Settings, username: str, password: str) -> bool   # hm
   `HostSessions`, uncached `Settings`):
   * `/` (`player.py` → `views.player_page`): `?seat=<token>` → player view (token in URL so browser
     refresh keeps the seat); otherwise → join view. `?role=host` (old links) → `/login`.
+    Join view: `views.seat_picker` (a fragment refreshing every `JOIN_POLL_SEC`) lists every
+    group's seats as buttons; tapping a free one calls `RoomRegistry.take_seat` (no name yet) and
+    puts the token in `?seat=`. An unnamed seat shows only the name step (`RoomRegistry.rename`,
+    plus **Pick another seat** in the lobby). Renaming: lobby only, or any time while unnamed.
+    With more than one group the player view has **My group** / **All groups** tabs; All groups
+    is a fragment refreshing every `max(refresh_sec, ALL_GROUPS_REFRESH_SEC)` that shows the
+    overview (Group, Status, Group total) and, per group, `seats_line` + `render_results`.
   * `/login` (`login.py` → `views.login_page`): username/password form. On success
     `HostSessions.issue()` and `st.switch_page` to `/host?auth=<token>`. Without a configured login
     it goes straight to `/host`.
   * `/host` (`host.py` → `views.host_page`): needs a valid `auth` token (URL or session state),
     else → `/login`. **Log out** revokes the token. Without a configured login it shows the yellow
     warning "No host login set: anyone with this URL can control the game. Set WSG_HOST_USERNAME and
-    WSG_HOST_PASSWORD to lock it." **Play as a player** reuses `views.join_form`; the host's seat
+    WSG_HOST_PASSWORD to lock it." **Play as a player** reuses `views.seat_picker`; the host's seat
     token is kept as `?seat=` on the host URL, with a link to `./?seat=<token>`.
 * `wallstreet/auth.py`: `HostSessions(ttl_sec=12 * 3600)`: thread-safe `issue() -> str`,
   `is_valid(token) -> bool`, `revoke(token)`; random `secrets.token_urlsafe(32)` tokens kept in

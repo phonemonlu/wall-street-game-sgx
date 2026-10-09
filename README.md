@@ -58,7 +58,7 @@ Then open:
 
 | URL | Who |
 |---|---|
-| `http://<host>:8501/` | **Players**: pick a group and a free seat, enter a name, click Join |
+| `http://<host>:8501/` | **Players**: tap a free seat (every group's seats are listed), then enter a name |
 | `http://<host>:8501/login` | **Host login**: username and password (see [Configuration](#configuration)) |
 | `http://<host>:8501/host` | **Host**: create groups, start/reveal/advance rounds, bots, timers, leaderboard. Sends you to `/login` first. |
 
@@ -81,11 +81,16 @@ link on your phone), where you enter your name. Play from that tab; run the game
 ### Running a session
 
 1. Host: open **Setup**, choose the number of groups (1–50) and click **Create groups**.
-2. Players join. The host can fill empty seats with bots.
+2. Players tap a free seat, which is theirs at once, then enter their name. They can change the
+   name (or, before naming, pick another seat) until the game starts. The host can fill empty
+   seats with bots.
 3. Host: **Start** each group, or **Start all**. In every round, **Reveal** becomes available once
    all four seats have chosen. Then click **Next round**.
-4. The **Leaderboard** tab ranks players and groups. **Download results (JSON)** exports everything.
-5. **Reset game** (behind a **Confirm reset** checkbox) deletes all groups.
+4. With more than one group, players get **My group** and **All groups** tabs. **All groups**
+   shows every group's revealed rounds: each player's card and points, and the group total.
+   Unrevealed cards are never shown.
+5. The **Leaderboard** tab ranks players and groups. **Download results (JSON)** exports everything.
+6. **Reset game** (behind a **Confirm reset** checkbox) deletes all groups.
 
 ## Configuration
 

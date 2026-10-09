@@ -37,6 +37,7 @@ WAITING_FOR_GROUPS = "Waiting for the host to create groups"
 MAX_TABS = 8  # more groups than this: pick the group from a selectbox instead of one tab each
 DEFAULT_TIMER_SEC = 120
 JOIN_POLL_SEC = 2.0
+ALL_GROUPS_REFRESH_SEC = 3.0  # the All groups tab redraws every group's table, so refresh it less often
 FLASH_SEC = 6.0
 
 _BIG_BUTTONS_CSS = """<style>
@@ -141,11 +142,23 @@ def md_escape(text: str) -> str:
     return _MD_SPECIAL.sub(r"\\\1", text)
 
 
-def seat_status(seat: SeatView, phase: Phase) -> str:
-    """``"Bot (Always Y) · ✓ submitted"`` / ``"Ann · pending"`` / ``"free"``."""
+def seat_name(seat: SeatView) -> str:
+    """The seat's name for display (markdown-escaped); placeholders for free or unnamed seats."""
     if seat.is_free:
         return "free"
-    who = seat.name if seat.is_bot else f"{md_escape(seat.name)} (human)"
+    return md_escape(seat.name) if seat.name else "no name yet"
+
+
+def seats_line(snapshot: RoomSnapshot) -> str:
+    """``"P1 Ann · P2 Bot (Smart) · P3 free · P4 no name yet"``."""
+    return " · ".join(f"{seat.label} {seat_name(seat)}" for seat in snapshot.seats)
+
+
+def seat_status(seat: SeatView, phase: Phase) -> str:
+    """``"Bot (Smart) · ✓ submitted"`` / ``"Ann · pending"`` / ``"free"``."""
+    if seat.is_free:
+        return "free"
+    who = seat.name if seat.is_bot else f"{seat_name(seat)} (human)"
     if phase is not Phase.OPEN:
         return who
     return f"{who} · {'✓ submitted' if seat.submitted else '⏳ pending'}"
@@ -247,6 +260,11 @@ def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
     if snapshot.phase is Phase.OVER:
         st.header("Game over", anchor=False)
     st.subheader(f"Group {snapshot.group_id} | Group total {snapshot.group_total}", anchor=False)
+    render_results(snapshot, title_seat)
+
+
+def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
+    """The results table (bonus rows tinted, ``title_seat``'s column highlighted) and totals footer."""
     frame = results_frame(snapshot)
     if frame.empty:
         st.caption("No rounds revealed yet.")
@@ -286,41 +304,37 @@ def player_page(registry: RoomRegistry, settings: Settings) -> None:
 
 def join_view(registry: RoomRegistry) -> None:
     st.title(TITLE)
-    open_seats = registry.open_seats()
-    if not open_seats:
+    if not registry.group_ids():
         st.fragment(_wait_for_groups, run_every=JOIN_POLL_SEC)(registry)
         return
+    st.subheader("Pick a seat")
+    st.caption("Tap a free seat to take it. You choose your name next.")
+    st.fragment(seat_picker, run_every=JOIN_POLL_SEC)(registry, "join")
 
-    st.subheader("Join a group")
-    group_ids = sorted(open_seats)
-    group_id = st.selectbox(
-        "Group",
-        group_ids,
-        key="join_group",
-        format_func=lambda gid: f"Group {gid} · {len(open_seats[gid])} free seat(s)",
-    )
-    free = open_seats[group_id]
-    if not free:
-        st.warning(f"Group {group_id} is full. Pick another group.")
-        return
-    # All seats stay listed so a seat taken meanwhile is reported, not silently swapped for another.
-    seat = st.radio(
-        "Seat",
-        SEATS,
-        index=SEATS.index(free[0]),
-        horizontal=True,
-        key=f"join_seat_{group_id}",
-        format_func=lambda label: label if label in free else f"{label} (taken)",
-    )
-    name = st.text_input("Your name", max_chars=30, key="join_name")
-    if st.button("Join", type="primary", key="join_button"):
-        try:
-            token = registry.join(group_id, seat, name)
-        except GameError as err:
-            st.error(f"Could not join: {err}")
-        else:
-            st.query_params["seat"] = token
-            st.rerun()
+
+def seat_picker(registry: RoomRegistry, prefix: str) -> None:
+    """Every group's seats as buttons: tapping a free one takes it at once (the name comes after).
+
+    The new token goes into the page's ``?seat=`` query parameter. ``prefix`` keeps widget keys
+    apart when the picker appears on more than one page.
+    """
+    snapshots = registry.snapshots()
+    if not any(seat.is_free for snap in snapshots for seat in snap.seats):
+        st.caption("No free seats: every group is full.")
+    for snap in snapshots:
+        st.markdown(f"**Group {snap.group_id}**")
+        row = st.container(horizontal=True)
+        for seat in snap.seats:
+            shown = player_label(snap.group_id, seat.label)
+            label = shown if seat.is_free else f"{shown} · {seat_name(seat)}"
+            if row.button(label, key=f"{prefix}_{snap.group_id}_{seat.label}", disabled=not seat.is_free, width="stretch"):
+                try:
+                    token = registry.take_seat(snap.group_id, seat.label)
+                except GameError as err:
+                    st.error(f"Could not take {shown} in Group {snap.group_id}: {err}")
+                else:
+                    st.query_params["seat"] = token
+                    st.rerun()
 
 
 def _wait_for_groups(registry: RoomRegistry) -> None:
@@ -348,9 +362,59 @@ def player_view(registry: RoomRegistry, settings: Settings, token: str) -> None:
         return
     me = next(s for s in snapshot.seats if s.label == seat)
     st.header(f"{seat} | Group {group_id}", anchor=False)
+    if not me.name:
+        _name_step(registry, token, snapshot.phase)
+        return
     st.caption(f"Playing as **{md_escape(me.name)}**. Keep this URL: it is your seat.")
     st.html(_BIG_BUTTONS_CSS)
-    _live(_player_live, settings)(registry, token, group_id, seat)
+    if len(registry.group_ids()) > 1:
+        mine, everyone = st.tabs(["My group", "All groups"])
+        with mine:
+            _live(_player_live, settings)(registry, token, group_id, seat)
+        with everyone:
+            refresh = max(settings.refresh_sec, ALL_GROUPS_REFRESH_SEC)
+            st.fragment(_all_groups, run_every=refresh)(registry, group_id, seat)
+    else:
+        _live(_player_live, settings)(registry, token, group_id, seat)
+
+
+def _name_step(registry: RoomRegistry, token: str, phase: Phase) -> None:
+    st.success("This seat is yours. Choose the name the other players will see.")
+    _name_form(registry, token, "")
+    if phase is Phase.LOBBY and st.button("Pick another seat", key="change_seat"):
+        try:
+            registry.leave(token)
+        except GameError as err:
+            st.error(str(err))
+        else:
+            st.query_params.clear()
+            st.rerun()
+
+
+def _name_form(registry: RoomRegistry, token: str, current: str) -> None:
+    with st.form("name_form", border=False):
+        name = st.text_input("Your name", value=current, max_chars=30, key="name_input")
+        saved = st.form_submit_button("Save name", type="primary")
+    if saved:
+        try:
+            registry.rename(token, name)
+        except GameError as err:
+            st.error(str(err))
+        else:
+            st.rerun()
+
+
+def _all_groups(registry: RoomRegistry, my_group: int, my_seat: str) -> None:
+    """Every group's revealed rounds (never unrevealed cards: snapshots do not contain them)."""
+    snapshots = registry.snapshots()
+    st.dataframe(overview_frame(snapshots)[["Group", "Status", "Group total"]], hide_index=True)
+    for snap in snapshots:
+        mine = snap.group_id == my_group
+        # A fixed label keeps each expander open or closed across refreshes.
+        with st.expander(f"Group {snap.group_id}{' (your group)' if mine else ''}", expanded=len(snapshots) <= MAX_TABS):
+            st.markdown(f"**{round_label(snap)} | Group total {snap.group_total}**")
+            st.caption(seats_line(snap))
+            render_results(snap, title_seat=my_seat if mine else None)
 
 
 def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -> None:
@@ -361,6 +425,10 @@ def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -
     except (UnknownSeat, UnknownGroup):
         st.rerun()  # full rerun shows the "no longer valid" message
 
+    if snapshot.phase is Phase.LOBBY:  # in the live part, so it disappears when the host starts
+        me = next(s for s in snapshot.seats if s.label == seat)
+        with st.expander("Change name"):
+            _name_form(registry, token, me.name)
     render_round_status(snapshot)
     if snapshot.phase is not Phase.OVER:
         if waiting := pending_seats(snapshot):
