@@ -136,9 +136,7 @@ class Room:
             self._bump()
 
     def add_bots(self, strategy_name: str) -> list[str]:
-        factory = STRATEGIES.get(strategy_name)
-        if factory is None:
-            raise GameError(f"Unknown strategy {strategy_name!r}; choose one of {', '.join(STRATEGIES)}.")
+        factory = _strategy_factory(strategy_name)
         with self.lock:
             filled = [seat for seat in self.seats.values() if seat.is_free]
             for seat in filled:
@@ -148,6 +146,20 @@ class Room:
                     self._bots_submit(filled)
                 self._bump()
             return [seat.label for seat in filled]
+
+    def make_bot(self, label: str, strategy_name: str) -> str | None:
+        """Hand ``label`` (human or free, any phase) to a bot; returns the evicted token, if any."""
+        factory = _strategy_factory(strategy_name)
+        with self.lock:
+            seat = self.seat(label)
+            if seat.is_bot:
+                raise GameError(f"Seat {label} in group {self.group_id} is already a bot.")
+            old_token = seat.token
+            seat.token, seat.strategy, seat.name = None, factory(), f"Bot ({strategy_name})"
+            if self.game.phase is Phase.OPEN:
+                self._bots_submit([seat])
+            self._bump()
+            return old_token
 
     def start(self) -> None:
         with self.lock:
@@ -205,6 +217,13 @@ class Room:
 
     def _bump(self) -> None:
         self.version += 1
+
+
+def _strategy_factory(strategy_name: str) -> Callable[[], Strategy]:
+    factory = STRATEGIES.get(strategy_name)
+    if factory is None:
+        raise GameError(f"Unknown strategy {strategy_name!r}; choose one of {', '.join(STRATEGIES)}.")
+    return factory
 
 
 def _ranked(rows: list[dict], key: str = "points") -> list[dict]:
@@ -315,6 +334,15 @@ class RoomRegistry:
 
     def fill_with_bots(self, group_id: int, strategy_name: str) -> list[str]:
         return self._room(group_id).add_bots(strategy_name)
+
+    def replace_with_bot(self, group_id: int, seat: str, strategy_name: str) -> None:
+        """Hand a human (or free) seat to a bot in any phase; the human's token stops working."""
+        room = self._room(group_id)
+        with room.lock:
+            old_token = room.make_bot(seat, strategy_name)
+            if old_token is not None:
+                with self._lock:
+                    self._tokens.pop(old_token, None)
 
     def start(self, group_id: int) -> None:
         self._room(group_id).start()

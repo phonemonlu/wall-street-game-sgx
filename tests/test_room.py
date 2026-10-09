@@ -263,6 +263,75 @@ def test_bot_added_to_open_round_submits_immediately():
     assert room.game.choice_of("P2") is X
 
 
+def test_replace_with_bot_in_lobby_invalidates_token(reg: RoomRegistry):
+    token = reg.join(1, "P2", "Ann")
+    v = reg.snapshot(1).version
+    reg.replace_with_bot(1, "P2", "Tit for Tat")
+    seat = reg.snapshot(1).seats[1]
+    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Tit for Tat)", True, False)
+    assert reg.snapshot(1).version == v + 1
+    for action in (lambda: reg.locate(token), lambda: reg.submit(token, X), lambda: reg.leave(token)):
+        with pytest.raises(UnknownSeat):
+            action()
+    assert token not in reg._tokens
+
+
+def test_replace_with_bot_in_open_round_submits_immediately(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    reg.submit(tokens["P1"], Y)
+    reg.replace_with_bot(1, "P3", "Always X")
+    assert [s.submitted for s in reg.snapshot(1).seats] == [True, False, True, False]
+    with pytest.raises(UnknownSeat):
+        reg.submit(tokens["P3"], Y)
+    for seat in ("P2", "P4"):
+        reg.submit(tokens[seat], Y)
+    record = reg.reveal(1)
+    assert record.choices["P3"] is X
+    reg.next_round(1)  # the bot keeps playing in later rounds
+    assert [s.submitted for s in reg.snapshot(1).seats] == [False, False, True, False]
+
+
+def test_replace_with_bot_overrides_a_humans_pending_choice(reg: RoomRegistry):
+    tokens = join_all(reg)
+    reg.start(1)
+    reg.submit(tokens["P1"], X)
+    reg.replace_with_bot(1, "P1", "Always Y")
+    assert reg._room(1).game.choice_of("P1") is Y
+
+
+@pytest.mark.parametrize("phase", ["revealed", "over"])
+def test_replace_with_bot_in_later_phases(phase: str):
+    reg = RoomRegistry(rounds=1 if phase == "over" else 10)
+    reg.create_groups(1)
+    tokens = join_all(reg)
+    reg.start(1)
+    submit_all(reg, tokens, "XYYY")
+    reg.reveal(1)
+    assert reg.snapshot(1).phase is Phase(phase)
+    reg.replace_with_bot(1, "P1", "Random")
+    assert reg.snapshot(1).seats[0].is_bot
+    assert dict(reg.snapshot(1).totals)["P1"] == 30  # history is untouched
+    with pytest.raises(UnknownSeat):
+        reg.my_choice(tokens["P1"])
+
+
+def test_replace_with_bot_free_seat_and_errors(reg: RoomRegistry):
+    reg.replace_with_bot(1, "P4", "Always Y")
+    assert reg.snapshot(1).seats[3].is_bot
+    v = reg.snapshot(1).version
+    with pytest.raises(GameError, match="already a bot"):
+        reg.replace_with_bot(1, "P4", "Always X")
+    with pytest.raises(GameError):
+        reg.replace_with_bot(1, "P1", "Nope")
+    with pytest.raises(UnknownSeat):
+        reg.replace_with_bot(1, "P9", "Always Y")
+    with pytest.raises(UnknownGroup):
+        reg.replace_with_bot(99, "P1", "Always Y")
+    assert reg.snapshot(1).version == v
+    assert reg.snapshot(1).seats[0].is_free
+
+
 def test_all_bot_strategies_play_full_games(reg: RoomRegistry):
     for name in STRATEGIES:
         reg.create_groups(1)

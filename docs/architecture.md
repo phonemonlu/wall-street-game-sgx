@@ -143,6 +143,10 @@ class RoomRegistry:
     def locate(self, token: str) -> tuple[int, str]             # (group_id, seat) or UnknownSeat
     def leave(self, token: str) -> None
     def fill_with_bots(self, group_id: int, strategy_name: str) -> list[str]  # fills free seats, returns labels
+    def replace_with_bot(self, group_id: int, seat: str, strategy_name: str) -> None
+        # any phase: a human (or free) seat becomes a bot; the human's token is removed from the
+        # index (UnknownSeat afterwards); in OPEN the bot submits at once (overriding a pending
+        # human pick). GameError if already a bot / unknown strategy; UnknownSeat / UnknownGroup.
     def start(self, group_id: int) -> None         # LOBBY->OPEN; NotReady if any seat free
     def submit(self, token: str, card: Card) -> None
     def my_choice(self, token: str) -> Card | None
@@ -182,3 +186,13 @@ def check_pin(expected: str | None, given: str) -> bool   # hmac.compare_digest;
 * Results table columns `RD | Total | P1 | P2 | P3 | P4`; cells `"X +10"` / `"Y -30"`; Total = round group total.
   Footer: `P1: 270 P2: -90 P3: -50 P4: -130`. Header `Group N | Group total T`.
 * Live parts use `@st.fragment(run_every=settings.refresh_sec)`.
+* `views.py` keeps logic in pure helpers that never touch streamlit and are unit-tested directly:
+  `results_frame(snapshot) -> DataFrame` (revealed rounds only), `totals_line(snapshot) -> str`,
+  `round_label`, `bonus_hint`, `seconds_left`, `countdown_text`, `pending_seats`, `seat_status`.
+  Render functions: `render_banner(settings)`, `render_round_status(snapshot)`,
+  `render_board(snapshot, title_seat)` ("Game over" heading, `Group N | Group total T`, table,
+  footer), `join_view(registry)`, `player_view(registry, settings, token)`,
+  `host_view(registry, settings)`.
+* Host per-group panels are tabs (≤ 8 groups) or a selectbox with an overview table (> 8 groups).
+  Widget callbacks read widget values from `st.session_state` when they fire, so a value changed in
+  the same interaction as a click is never stale.
