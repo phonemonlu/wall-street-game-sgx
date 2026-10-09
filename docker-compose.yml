@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    image: wall-street-game:latest
+    ports:
+      - "8501:8501"
+    environment:
+      WSG_HOST_PIN: ${WSG_HOST_PIN:-}
+      WSG_REFRESH_SEC: ${WSG_REFRESH_SEC:-1}
+      WSG_ROUNDS: ${WSG_ROUNDS:-10}
+    restart: unless-stopped
+
+  stress:
+    build: .
+    profiles: ["loadtest"]
+    command: ["python", "-m", "loadtest.stress", "--groups", "50", "--threads", "32"]
