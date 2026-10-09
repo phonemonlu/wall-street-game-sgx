@@ -27,7 +27,7 @@ class RecordingRegistry(RoomRegistry):
 
 @pytest.fixture(autouse=True)
 def fresh_app(monkeypatch: pytest.MonkeyPatch):
-    for key in ("WSG_HOST_PIN", "WSG_REFRESH_SEC", "WSG_ROUNDS"):
+    for key in ("WSG_HOST_USERNAME", "WSG_HOST_PASSWORD", "WSG_REFRESH_SEC", "WSG_ROUNDS"):
         monkeypatch.delenv(key, raising=False)
     RecordingRegistry.instances = []
     monkeypatch.setattr(wallstreet.room, "RoomRegistry", RecordingRegistry)
@@ -215,11 +215,11 @@ def test_join_errors_are_friendly():
 # -- host ---------------------------------------------------------------------------------------
 
 
-def test_host_page_warns_without_pin():
+def test_host_page_warns_without_login():
     at = run(role="host")
     assert not at.exception
     assert texts(at.title) == ["Wall Street Game"]
-    assert texts(at.warning) == [views.NO_PIN_WARNING]
+    assert texts(at.warning) == [views.NO_LOGIN_WARNING]
     assert at.button(key="create_groups")
 
 

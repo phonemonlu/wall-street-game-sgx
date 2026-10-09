@@ -26,4 +26,4 @@ class UnknownSeat(GameError):
 
 
 class AuthError(GameError):
-    """Wrong or missing host PIN."""
+    """Wrong or missing host login."""

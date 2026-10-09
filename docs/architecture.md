@@ -169,18 +169,20 @@ never block each other. Tokens are unguessable; a token maps to exactly one seat
 ```python
 @dataclass(frozen=True)
 class Settings:
-    host_pin: str | None      # WSG_HOST_PIN (empty => None)
+    host_username: str | None # WSG_HOST_USERNAME (empty => None)
+    host_password: str | None # WSG_HOST_PASSWORD (set both or neither)
     refresh_sec: float        # WSG_REFRESH_SEC, default 1.0
     rounds: int               # WSG_ROUNDS, default 10
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings"
-def check_pin(expected: str | None, given: str) -> bool   # hmac.compare_digest; True if expected is None
+def check_login(settings: Settings, username: str, password: str) -> bool   # hmac.compare_digest on both; True if no login set
 ```
 
 ## UI (`app.py`, `views.py`)
 
-* `?role=host` → host view (PIN gate if `WSG_HOST_PIN` set, else yellow warning
-  "No host PIN set: anyone with this URL can control the game. Set WSG_HOST_PIN to lock it.").
+* `?role=host` → host view (username/password login if `WSG_HOST_USERNAME` and `WSG_HOST_PASSWORD`
+  are set, else yellow warning "No host login set: anyone with this URL can control the game.
+  Set WSG_HOST_USERNAME and WSG_HOST_PASSWORD to lock it.").
 * `?seat=<token>` → player view (token in URL so browser refresh keeps the seat).
 * otherwise → join view.
 * Results table columns `RD | Total | P1 | P2 | P3 | P4`; cells `"X +10"` / `"Y -30"`; Total = round group total.

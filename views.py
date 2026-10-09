@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
-from wallstreet.config import Settings, check_pin
+from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
 from wallstreet.room import RoomRegistry, RoomSnapshot, SeatView
@@ -23,7 +23,11 @@ from wallstreet.scoring import SEATS, Card
 from wallstreet.strategies import STRATEGIES
 
 TITLE = "Wall Street Game"
-NO_PIN_WARNING = "No host PIN set: anyone with this URL can control the game. Set WSG_HOST_PIN to lock it."
+NO_LOGIN_WARNING = (
+    "No host login set: anyone with this URL can control the game. "
+    "Set WSG_HOST_USERNAME and WSG_HOST_PASSWORD to lock it."
+)
+WRONG_LOGIN = "Wrong username or password."
 WAITING_FOR_GROUPS = "Waiting for the host to create groups"
 MAX_TABS = 8  # more groups than this: pick the group from a selectbox instead of one tab each
 DEFAULT_TIMER_SEC = 120
@@ -201,8 +205,8 @@ def _live(func: Callable[..., None], settings: Settings) -> Callable[..., None]:
 
 
 def render_banner(settings: Settings) -> None:
-    if settings.host_pin is None:
-        st.warning(NO_PIN_WARNING, icon="⚠️")
+    if not settings.host_login_required:
+        st.warning(NO_LOGIN_WARNING, icon="⚠️")
 
 
 def render_round_status(snapshot: RoomSnapshot) -> None:
@@ -370,18 +374,19 @@ def host_view(registry: RoomRegistry, settings: Settings) -> None:
 
 
 def _host_unlocked(settings: Settings) -> bool:
-    if settings.host_pin is None:
+    if not settings.host_login_required or st.session_state.get("host_logged_in"):
         return True
-    if check_pin(settings.host_pin, st.session_state.get("host_pin", "")):
-        return True
-    with st.form("host_pin_form"):
-        pin = st.text_input("Host PIN", type="password", key="host_pin_input")
-        submitted = st.form_submit_button("Unlock")
+    with st.form("host_login_form"):
+        username = st.text_input("Username", key="host_username_input", autocomplete="username")
+        password = st.text_input(
+            "Password", type="password", key="host_password_input", autocomplete="current-password"
+        )
+        submitted = st.form_submit_button("Log in")
     if submitted:
-        if check_pin(settings.host_pin, pin):
-            st.session_state["host_pin"] = pin
+        if check_login(settings, username, password):
+            st.session_state["host_logged_in"] = True
             st.rerun()
-        st.error("Wrong PIN.")
+        st.error(WRONG_LOGIN)
     return False
 
 

@@ -9,8 +9,9 @@ from wallstreet.room import RoomRegistry
 st.set_page_config(page_title="Wall Street Game", layout="wide", initial_sidebar_state="collapsed")
 
 
-@st.cache_resource
 def get_settings() -> Settings:
+    # Not cached: reading env is cheap, and a cached instance would outlive a hot reload of
+    # wallstreet/config.py, leaving new code to run against an object of the old Settings class.
     return Settings.from_env()
 
 

@@ -50,7 +50,7 @@ streamlit run app.py
 With Docker Compose:
 
 ```bash
-cp .env.example .env          # optional: set WSG_HOST_PIN
+cp .env.example .env          # set WSG_HOST_USERNAME / WSG_HOST_PASSWORD
 docker compose up --build
 ```
 
@@ -77,7 +77,8 @@ reopening it on the same device keeps the seat. Treat it like a password.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WSG_HOST_PIN` | *(empty)* | PIN for `/?role=host`. When empty, the host page shows a warning and anyone with the URL can control the game. |
+| `WSG_HOST_USERNAME` | *(empty)* | Host login username for `/login`. |
+| `WSG_HOST_PASSWORD` | *(empty)* | Host login password. Set both or neither. When both are empty, the host page shows a warning and anyone with the URL can control the game. |
 | `WSG_REFRESH_SEC` | `1` | How often the live parts of each page refresh, in seconds. |
 | `WSG_ROUNDS` | `10` | Rounds per game. Bonus rounds keep their fixed numbers (5, 8, 10). |
 
