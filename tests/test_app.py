@@ -11,6 +11,8 @@ from wallstreet.game import Phase
 from wallstreet.room import RoomRegistry
 from wallstreet.scoring import SEATS, Card
 
+pytestmark = pytest.mark.usefixtures("fixed_bots")  # deterministic "Always X" / "Always Y" bots
+
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 SCREENSHOT_GAME = ["XYXX", "YXYY", "YYXX", "XXXY", "XYYY", "YXXY", "XYYY", "YXXX", "XYYY", "XYYY"]
 
@@ -275,7 +277,8 @@ def test_host_group_controls_bots_and_global_actions():
     at.button(key="all_Start all").click().run()
     assert any("skipped 2 group(s)" in text for text in texts(at.info))
 
-    at.selectbox(key="fill_strategy_1").set_value("Always X")
+    assert at.selectbox(key="fill_strategy_1").options[:2] == ["Random", "Smart"]
+    at.selectbox(key="fill_strategy_1").set_value("Smart")
     at.button(key="fill_1").click().run()
     assert [s.is_bot for s in reg.snapshot(1).seats] == [False, True, True, True]
     at.button(key="Start_1").click().run()
@@ -283,7 +286,7 @@ def test_host_group_controls_bots_and_global_actions():
     assert at.button(key="Reveal_1").disabled  # P1 has not chosen
     assert "Ann (human) · ⏳ pending" in texts(at.caption)
 
-    at.selectbox(key="replace_strategy_1").set_value("Always Y")
+    at.selectbox(key="replace_strategy_1").set_value("Smart")
     at.button(key="replace_1").click().run()  # P1 is the only human seat
     with pytest.raises(UnknownSeat):
         reg.locate(token)
@@ -291,7 +294,7 @@ def test_host_group_controls_bots_and_global_actions():
     at.button(key="Reveal_1").click().run()
     assert reg.snapshot(1).phase is Phase.REVEALED
     assert at.dataframe  # the board
-    assert "Group 1 | Group total 0" in texts(at.subheader)
+    assert "Group 1 | Group total 40" in texts(at.subheader)  # an all-smart group cooperates
 
 
 def test_host_bonus_prompt_starts_group_timer():

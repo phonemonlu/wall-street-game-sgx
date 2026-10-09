@@ -90,12 +90,11 @@ open, the bot plays immediately.
 
 | Strategy | Plays |
 |---|---|
-| Always Y | Y every round |
-| Always X | X every round |
-| Tit for Tat | Y in round 1; then X if any *other* seat played X in the last revealed round |
-| Grim Trigger | Y until any other seat ever plays X, then X forever |
-| Bonus Defector | X in bonus rounds, Y otherwise |
 | Random | X or Y with equal probability |
+| Smart | Sees the other seats' **final** cards when the host reveals, then plays the best reply: the highest group total first, then its own score. On its own that means **X**, unless the other three all chose the same card, then **Y** (it gives up 20 points so the group gets +40 instead of 0, or 0 instead of −40). Several smart bots in one group choose together as a team; an all-smart group plays Y every round. |
+
+A smart bot always shows as "✓ submitted", so it never holds up **Reveal**. Players can change
+their card until the reveal, and the bot always answers the final cards.
 
 ## Architecture
 

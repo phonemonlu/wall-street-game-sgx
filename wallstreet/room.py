@@ -23,7 +23,7 @@ from wallstreet.errors import (
 )
 from wallstreet.game import Game, Phase, RoundRecord
 from wallstreet.scoring import SEATS, Card, multiplier
-from wallstreet.strategies import STRATEGIES, Strategy
+from wallstreet.strategies import STRATEGIES, SmartBot, Strategy, smart_choices
 
 MAX_GROUPS = 200
 
@@ -184,6 +184,7 @@ class Room:
 
     def reveal(self) -> RoundRecord:
         with self.lock:
+            self._smart_bots_decide()
             record = self.game.reveal()
             self._bump()
             return record
@@ -205,6 +206,21 @@ class Room:
             if seat.strategy is not None:
                 round_no = self.game.round_no
                 self.game.submit(seat.label, seat.strategy.choose(seat.label, round_no, history))
+
+    def _smart_bots_decide(self) -> None:
+        """Replace smart bots' placeholder cards with their best reply to everyone's final cards.
+
+        Runs under the room lock right before the reveal, so no human can change a card afterwards.
+        Does nothing unless every seat has chosen; game.reveal() then reports what is missing.
+        """
+        if self.game.phase is not Phase.OPEN or self.game.pending_seats():
+            return
+        smart = [seat.label for seat in self.seats.values() if isinstance(seat.strategy, SmartBot)]
+        if not smart:
+            return
+        choices = {label: self.game.choice_of(label) for label in SEATS}
+        for label, card in smart_choices(choices, smart, self.game.round_no).items():  # type: ignore[arg-type]
+            self.game.submit(label, card)
 
     def _seat_view(self, seat: Seat) -> SeatView:
         return SeatView(

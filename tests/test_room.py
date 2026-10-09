@@ -14,9 +14,11 @@ from wallstreet.errors import (
 from wallstreet.game import Game, Phase
 from wallstreet.room import Room, RoomRegistry, Seat
 from wallstreet.scoring import SEATS, Card
-from wallstreet.strategies import STRATEGIES, RandomStrategy
+from wallstreet.strategies import STRATEGIES, RandomStrategy, SmartBot
 
 X, Y = Card.X, Card.Y
+
+pytestmark = pytest.mark.usefixtures("fixed_bots")  # deterministic "Always X" / "Always Y" bots
 
 REAL_GAME = ["XYXX", "YXYY", "YYXX", "XXXY", "XYYY", "YXXY", "XYYY", "YXXX", "XYYY", "XYYY"]
 
@@ -266,9 +268,9 @@ def test_bot_added_to_open_round_submits_immediately():
 def test_replace_with_bot_in_lobby_invalidates_token(reg: RoomRegistry):
     token = reg.join(1, "P2", "Ann")
     v = reg.snapshot(1).version
-    reg.replace_with_bot(1, "P2", "Tit for Tat")
+    reg.replace_with_bot(1, "P2", "Smart")
     seat = reg.snapshot(1).seats[1]
-    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Tit for Tat)", True, False)
+    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Smart)", True, False)
     assert reg.snapshot(1).version == v + 1
     for action in (lambda: reg.locate(token), lambda: reg.submit(token, X), lambda: reg.leave(token)):
         with pytest.raises(UnknownSeat):
@@ -345,15 +347,52 @@ def test_all_bot_strategies_play_full_games(reg: RoomRegistry):
         assert snap.phase is Phase.OVER and len(snap.history) == 10
 
 
-def test_tit_for_tat_bots_see_history(reg: RoomRegistry):
+def test_smart_bots_reply_to_final_cards_at_reveal(reg: RoomRegistry):
     token = reg.join(1, "P1", "Ann")
-    reg.fill_with_bots(1, "Tit for Tat")
+    reg.fill_with_bots(1, "Smart")
     reg.start(1)
-    reg.submit(token, X)
-    reg.reveal(1)
+    assert reg.snapshot(1).seats[1].submitted  # smart seats never block the reveal
+    reg.submit(token, Y)
+    reg.submit(token, X)  # Ann changes her mind: only the final card counts
+    record = reg.reveal(1)
+    # Against one X the team keeps the group at 0 (not -40) and takes the most points: X, X, Y.
+    assert dict(record.choices) == {"P1": X, "P2": X, "P3": X, "P4": Y}
     reg.next_round(1)
-    room = reg._room(1)
-    assert [room.game.choice_of(s) for s in ("P2", "P3", "P4")] == [X, X, X]
+    reg.submit(token, Y)
+    assert dict(reg.reveal(1).choices) == {"P1": Y, "P2": Y, "P3": Y, "P4": Y}
+
+
+def test_smart_bot_waits_for_humans(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.replace_with_bot(1, "P4", "Smart")
+    reg.start(1)
+    for label in ("P1", "P2"):
+        reg.submit(tokens[label], Y)
+    with pytest.raises(NotReady, match="P3"):
+        reg.reveal(1)
+    reg.submit(tokens["P3"], Y)
+    assert reg.reveal(1).choices["P4"] is Y  # the others all played Y: protect the +40
+
+
+def test_smart_bot_replacing_a_human_mid_round(reg: RoomRegistry):
+    tokens = join_all(reg, 1)
+    reg.start(1)
+    submit_all(reg, tokens, "XYYY")
+    reg.replace_with_bot(1, "P1", "Smart")  # overrides P1's pending X
+    assert isinstance(reg._room(1).seats["P1"].strategy, SmartBot)
+    assert reg.reveal(1).choices["P1"] is Y  # the others all played Y
+
+
+def test_smart_bots_see_random_bots(reg: RoomRegistry):
+    reg.replace_with_bot(1, "P1", "Smart")
+    reg.fill_with_bots(1, "Random")
+    reg.start(1)
+    for _ in range(9):
+        record = reg.reveal(1)
+        others = [record.choices[s] for s in SEATS[1:]]
+        expected = Y if len(set(others)) == 1 else X
+        assert record.choices["P1"] is expected
+        reg.next_round(1)
 
 
 # -- play ---------------------------------------------------------------------------------------
@@ -616,7 +655,7 @@ def test_group_leaderboard_ties(reg: RoomRegistry):
 
 def test_export_is_json_serialisable(reg: RoomRegistry):
     tokens = join_all(reg, 1)
-    reg.fill_with_bots(2, "Bonus Defector")
+    reg.fill_with_bots(2, "Random")
     reg.start(1)
     submit_all(reg, tokens, "XYXX")
     reg.reveal(1)

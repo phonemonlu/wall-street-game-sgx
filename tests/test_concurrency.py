@@ -81,7 +81,7 @@ def test_concurrent_submit_and_reveal_one_reveal_per_round():
     }
 
 
-@pytest.mark.parametrize("strategy", ["Random", "Tit for Tat"])
+@pytest.mark.parametrize("strategy", ["Random", "Smart"])
 def test_parallel_bot_games(strategy: str):
     reg = RoomRegistry()
     reg.create_groups(50)

@@ -1,66 +1,18 @@
 """Bot strategies."""
 
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
+from itertools import product
 from typing import Protocol
 
 from wallstreet.game import RoundRecord
-from wallstreet.scoring import BONUS_ROUNDS, Card
+from wallstreet.scoring import SEATS, Card, score_round
 
 
 class Strategy(Protocol):
     name: str
 
     def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card: ...
-
-
-def _others_played_x(seat: str, record: RoundRecord) -> bool:
-    return any(card is Card.X for other, card in record.choices.items() if other != seat)
-
-
-class AlwaysY:
-    name = "Always Y"
-
-    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
-        return Card.Y
-
-
-class AlwaysX:
-    name = "Always X"
-
-    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
-        return Card.X
-
-
-class TitForTat:
-    """Y in round 1; afterwards X iff any other seat played X in the last revealed round."""
-
-    name = "Tit for Tat"
-
-    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
-        if history and _others_played_x(seat, history[-1]):
-            return Card.X
-        return Card.Y
-
-
-class GrimTrigger:
-    """Y until any other seat ever plays X, then X forever."""
-
-    name = "Grim Trigger"
-
-    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
-        if any(_others_played_x(seat, record) for record in history):
-            return Card.X
-        return Card.Y
-
-
-class BonusDefector:
-    """X in bonus rounds, Y otherwise."""
-
-    name = "Bonus Defector"
-
-    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
-        return Card.X if round_no in BONUS_ROUNDS else Card.Y
 
 
 class RandomStrategy:
@@ -78,7 +30,36 @@ class RandomStrategy:
         return Card.X if self._rng.random() < self.p_x else Card.Y
 
 
-STRATEGIES: dict[str, Callable[[], Strategy]] = {
-    cls.name: cls
-    for cls in (AlwaysY, AlwaysX, TitForTat, GrimTrigger, BonusDefector, RandomStrategy)
-}
+class SmartBot:
+    """Sees every other seat's final card and plays the best reply (see ``smart_choices``).
+
+    ``choose`` only fills the seat when a round opens, so the seat counts as submitted and never
+    blocks a reveal. The room replaces that placeholder with ``smart_choices`` at reveal time.
+    """
+
+    name = "Smart"
+
+    def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card:
+        return Card.Y
+
+
+def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int) -> dict[str, Card]:
+    """Best cards for ``smart_seats`` given everyone else's cards in ``choices``.
+
+    The smart seats act as one team: highest group total first, then the highest combined score
+    of the smart seats. With the PAYOFF table a lone smart bot therefore plays X, unless the other
+    three all chose the same card, then Y (it gives up 20 points to save the group 40). Ties go to
+    the first combination in seat order, X before Y, so the result is deterministic.
+    """
+    team = [seat for seat in SEATS if seat in smart_seats]
+    others = {seat: Card(card) for seat, card in choices.items() if seat not in smart_seats}
+
+    def rank(pick: dict[str, Card]) -> tuple[int, int]:
+        payoffs = score_round({**others, **pick}, round_no)
+        return sum(payoffs.values()), sum(payoffs[seat] for seat in team)
+
+    combos = (dict(zip(team, cards, strict=True)) for cards in product(Card, repeat=len(team)))
+    return max(combos, key=rank)
+
+
+STRATEGIES: dict[str, Callable[[], Strategy]] = {cls.name: cls for cls in (RandomStrategy, SmartBot)}

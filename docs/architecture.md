@@ -90,10 +90,18 @@ class Strategy(Protocol):
     name: str
     def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card
 ```
-Implementations: `AlwaysY`, `AlwaysX`, `TitForTat` (X iff any *other* seat played X in last
-revealed round; Y in round 1), `GrimTrigger` (Y until any other seat ever plays X, then X forever),
-`BonusDefector` (X in bonus rounds, else Y), `RandomStrategy(p_x: float = 0.5, seed: int | None = None)`.
-`STRATEGIES: dict[str, Callable[[], Strategy]]` keyed by display name.
+Implementations: `RandomStrategy(p_x: float = 0.5, seed: int | None = None)` and `SmartBot`.
+`STRATEGIES: dict[str, Callable[[], Strategy]]` keyed by display name ("Random", "Smart").
+
+`SmartBot.choose` only places a placeholder card when a round opens, so the seat counts as
+submitted. `Room.reveal()` (under the room lock, once every seat has a card) replaces the
+placeholders with
+```python
+def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int) -> dict[str, Card]
+```
+which tries every card combination for the smart seats (a team) and keeps the one with the
+highest group total, then the highest team score; ties go to the first combination in seat order,
+X before Y. A lone smart bot: X, unless the other three are unanimous, then Y.
 
 ## Room & registry (`wallstreet/room.py`)
 
@@ -130,7 +138,7 @@ class Room:
     def snapshot(self) -> RoomSnapshot
     # internal helpers used by RoomRegistry; all mutations happen under self.lock (threading.RLock)
     # and bump self.version. Bots auto-submit whenever a round opens (start/next_round) and when
-    # a bot is added to an OPEN round.
+    # a bot is added to an OPEN round. Smart bots re-decide at reveal (see smart_choices).
 
 class RoomRegistry:
     def __init__(self, rounds: int = 10, clock: Callable[[], float] = time.time)
