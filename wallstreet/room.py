@@ -1,0 +1,407 @@
+"""Thread-safe rooms (one per group) and the registry the UI talks to.
+
+Locking rules:
+* ``RoomRegistry._lock`` guards ``_groups`` and the token index; it is held only briefly.
+* Each ``Room.lock`` (an RLock) guards that room's game, seats, timer and version.
+* Lock order is room -> registry. The registry lock is never held while waiting on a room lock.
+"""
+
+import secrets
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+
+from wallstreet.errors import (
+    GameError,
+    InvalidTransition,
+    NotReady,
+    SeatTaken,
+    UnknownGroup,
+    UnknownSeat,
+)
+from wallstreet.game import Game, Phase, RoundRecord
+from wallstreet.scoring import SEATS, Card, multiplier
+from wallstreet.strategies import STRATEGIES, Strategy
+
+MAX_GROUPS = 200
+
+
+@dataclass
+class Seat:
+    label: str
+    token: str | None = None
+    name: str = ""
+    strategy: Strategy | None = None
+
+    @property
+    def is_bot(self) -> bool:
+        return self.strategy is not None
+
+    @property
+    def is_free(self) -> bool:
+        return self.token is None and self.strategy is None
+
+
+@dataclass(frozen=True)
+class SeatView:
+    label: str
+    name: str
+    is_bot: bool
+    is_free: bool
+    submitted: bool
+
+
+@dataclass(frozen=True)
+class RoomSnapshot:
+    """Immutable view of a room. Never contains unrevealed cards."""
+
+    group_id: int
+    phase: Phase
+    round_no: int
+    rounds: int
+    multiplier: int
+    next_multiplier: int
+    seats: tuple[SeatView, ...]
+    history: tuple[RoundRecord, ...]
+    totals: Mapping[str, int]
+    group_total: int
+    timer_ends_at: float | None
+    version: int
+
+
+@dataclass(eq=False)
+class Room:
+    group_id: int
+    rounds: int = 10
+    game: Game = field(init=False)
+    seats: dict[str, Seat] = field(init=False)
+    timer_ends_at: float | None = field(default=None, init=False)
+    version: int = field(default=0, init=False)
+    lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.game = Game(rounds=self.rounds)
+        self.seats = {label: Seat(label) for label in SEATS}
+
+    def snapshot(self) -> RoomSnapshot:
+        with self.lock:
+            game = self.game
+            round_no = game.round_no
+            return RoomSnapshot(
+                group_id=self.group_id,
+                phase=game.phase,
+                round_no=round_no,
+                rounds=game.rounds,
+                multiplier=multiplier(round_no) if round_no else 1,
+                next_multiplier=multiplier(round_no + 1),
+                seats=tuple(self._seat_view(seat) for seat in self.seats.values()),
+                history=game.history,
+                totals=MappingProxyType(game.totals()),
+                group_total=game.group_total(),
+                timer_ends_at=self.timer_ends_at,
+                version=self.version,
+            )
+
+    # -- internal helpers; called by RoomRegistry --------------------------------------------
+
+    def seat(self, label: str) -> Seat:
+        try:
+            return self.seats[label]
+        except KeyError:
+            raise UnknownSeat(f"Unknown seat {label!r}; expected one of {', '.join(SEATS)}.") from None
+
+    def seat_for_token(self, label: str, token: str) -> Seat:
+        """The seat still held by ``token``; UnknownSeat if it was released meanwhile."""
+        seat = self.seat(label)
+        if seat.token != token:
+            raise UnknownSeat("Unknown player token.")
+        return seat
+
+    def claim(self, label: str, name: str, token: str) -> None:
+        with self.lock:
+            seat = self.seat(label)
+            if not seat.is_free:
+                raise SeatTaken(f"Seat {label} in group {self.group_id} is already taken.")
+            seat.token, seat.name = token, name
+            self._bump()
+
+    def release(self, label: str, token: str) -> None:
+        with self.lock:
+            seat = self.seat_for_token(label, token)
+            if self.game.phase is not Phase.LOBBY:
+                raise InvalidTransition("You can only leave before the game starts.")
+            seat.token, seat.name = None, ""
+            self._bump()
+
+    def add_bots(self, strategy_name: str) -> list[str]:
+        factory = STRATEGIES.get(strategy_name)
+        if factory is None:
+            raise GameError(f"Unknown strategy {strategy_name!r}; choose one of {', '.join(STRATEGIES)}.")
+        with self.lock:
+            filled = [seat for seat in self.seats.values() if seat.is_free]
+            for seat in filled:
+                seat.strategy, seat.name = factory(), f"Bot ({strategy_name})"
+            if filled:
+                if self.game.phase is Phase.OPEN:
+                    self._bots_submit(filled)
+                self._bump()
+            return [seat.label for seat in filled]
+
+    def start(self) -> None:
+        with self.lock:
+            if self.game.phase is not Phase.LOBBY:
+                raise InvalidTransition("The game has already started.")
+            if free := [seat.label for seat in self.seats.values() if seat.is_free]:
+                raise NotReady(f"Group {self.group_id} still has free seats: {', '.join(free)}.")
+            self.game.start()
+            self._bots_submit(self.seats.values())
+            self._bump()
+
+    def submit(self, label: str, token: str, card: Card) -> None:
+        with self.lock:
+            self.seat_for_token(label, token)
+            self.game.submit(label, card)
+            self._bump()
+
+    def choice_of(self, label: str, token: str) -> Card | None:
+        with self.lock:
+            self.seat_for_token(label, token)
+            return self.game.choice_of(label)
+
+    def reveal(self) -> RoundRecord:
+        with self.lock:
+            record = self.game.reveal()
+            self._bump()
+            return record
+
+    def next_round(self) -> None:
+        with self.lock:
+            self.game.next_round()
+            self._bots_submit(self.seats.values())
+            self._bump()
+
+    def set_timer(self, ends_at: float | None) -> None:
+        with self.lock:
+            self.timer_ends_at = ends_at
+            self._bump()
+
+    def _bots_submit(self, seats: Iterable[Seat]) -> None:
+        history = self.game.history
+        for seat in seats:
+            if seat.strategy is not None:
+                round_no = self.game.round_no
+                self.game.submit(seat.label, seat.strategy.choose(seat.label, round_no, history))
+
+    def _seat_view(self, seat: Seat) -> SeatView:
+        return SeatView(
+            label=seat.label,
+            name=seat.name,
+            is_bot=seat.is_bot,
+            is_free=seat.is_free,
+            submitted=self.game.phase is Phase.OPEN and self.game.choice_of(seat.label) is not None,
+        )
+
+    def _bump(self) -> None:
+        self.version += 1
+
+
+def _ranked(rows: list[dict], key: str = "points") -> list[dict]:
+    """Competition ranking (1, 1, 3) on already-sorted rows."""
+    for i, row in enumerate(rows):
+        same_as_previous = i > 0 and rows[i - 1][key] == row[key]
+        row["rank"] = rows[i - 1]["rank"] if same_as_previous else i + 1
+    return rows
+
+
+class RoomRegistry:
+    def __init__(self, rounds: int = 10, clock: Callable[[], float] = time.time) -> None:
+        self.rounds = rounds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._groups: dict[int, Room] = {}
+        self._tokens: dict[str, tuple[int, str]] = {}
+
+    # -- groups -------------------------------------------------------------------------------
+
+    def create_groups(self, n: int) -> None:
+        if not 1 <= n <= MAX_GROUPS:
+            raise ValueError(f"Number of groups must be between 1 and {MAX_GROUPS}, got {n}.")
+        rooms = {gid: Room(gid, self.rounds) for gid in range(1, n + 1)}
+        with self._lock:
+            self._groups = rooms
+            self._tokens.clear()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._groups = {}
+            self._tokens.clear()
+
+    def group_ids(self) -> list[int]:
+        with self._lock:
+            return sorted(self._groups)
+
+    def _room(self, group_id: int) -> Room:
+        with self._lock:
+            room = self._groups.get(group_id)
+        if room is None:
+            raise UnknownGroup(f"There is no group {group_id}.")
+        return room
+
+    def _rooms(self) -> list[Room]:
+        with self._lock:
+            return [self._groups[gid] for gid in sorted(self._groups)]
+
+    def _by_token(self, token: str) -> tuple[Room, str]:
+        with self._lock:
+            entry = self._tokens.get(token)
+            room = self._groups.get(entry[0]) if entry else None
+        if entry is None or room is None:
+            raise UnknownSeat("Unknown player token.")
+        return room, entry[1]
+
+    # -- reads --------------------------------------------------------------------------------
+
+    def snapshot(self, group_id: int) -> RoomSnapshot:
+        return self._room(group_id).snapshot()
+
+    def snapshots(self) -> list[RoomSnapshot]:
+        return [room.snapshot() for room in self._rooms()]
+
+    def open_seats(self) -> dict[int, list[str]]:
+        result = {}
+        for snap in self.snapshots():
+            result[snap.group_id] = [seat.label for seat in snap.seats if seat.is_free]
+        return result
+
+    def locate(self, token: str) -> tuple[int, str]:
+        room, label = self._by_token(token)
+        return room.group_id, label
+
+    def my_choice(self, token: str) -> Card | None:
+        room, label = self._by_token(token)
+        return room.choice_of(label, token)
+
+    # -- players ------------------------------------------------------------------------------
+
+    def join(self, group_id: int, seat: str, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise GameError("Please enter your name.")
+        room = self._room(group_id)
+        token = secrets.token_urlsafe(16)
+        with room.lock:
+            room.claim(seat, name, token)
+            with self._lock:
+                stale = self._groups.get(group_id) is not room
+                if not stale:
+                    self._tokens[token] = (group_id, seat)
+        if stale:  # create_groups/reset replaced the room while we were joining
+            raise UnknownGroup(f"Group {group_id} was replaced; please join again.")
+        return token
+
+    def leave(self, token: str) -> None:
+        room, label = self._by_token(token)
+        room.release(label, token)
+        with self._lock:
+            self._tokens.pop(token, None)
+
+    def submit(self, token: str, card: Card) -> None:
+        room, label = self._by_token(token)
+        room.submit(label, token, card)
+
+    # -- host ---------------------------------------------------------------------------------
+
+    def fill_with_bots(self, group_id: int, strategy_name: str) -> list[str]:
+        return self._room(group_id).add_bots(strategy_name)
+
+    def start(self, group_id: int) -> None:
+        self._room(group_id).start()
+
+    def reveal(self, group_id: int) -> RoundRecord:
+        return self._room(group_id).reveal()
+
+    def next_round(self, group_id: int) -> None:
+        self._room(group_id).next_round()
+
+    def start_all(self) -> dict[int, str]:
+        return self._apply_all(Room.start)
+
+    def reveal_all(self) -> dict[int, str]:
+        return self._apply_all(Room.reveal)
+
+    def next_all(self) -> dict[int, str]:
+        return self._apply_all(Room.next_round)
+
+    def _apply_all(self, action: Callable[[Room], object]) -> dict[int, str]:
+        skipped: dict[int, str] = {}
+        for room in self._rooms():
+            try:
+                action(room)
+            except GameError as err:
+                skipped[room.group_id] = str(err)
+        return skipped
+
+    def start_timer(self, seconds: int, group_id: int | None = None) -> None:
+        if seconds <= 0:
+            raise ValueError(f"Timer seconds must be positive, got {seconds}.")
+        ends_at = self._clock() + seconds
+        for room in self._targets(group_id):
+            room.set_timer(ends_at)
+
+    def clear_timer(self, group_id: int | None = None) -> None:
+        for room in self._targets(group_id):
+            room.set_timer(None)
+
+    def _targets(self, group_id: int | None) -> list[Room]:
+        return self._rooms() if group_id is None else [self._room(group_id)]
+
+    # -- results ------------------------------------------------------------------------------
+
+    def leaderboard(self) -> list[dict]:
+        rows = [
+            {
+                "rank": 0,
+                "group": snap.group_id,
+                "seat": seat.label,
+                "name": seat.name,
+                "bot": seat.is_bot,
+                "points": snap.totals[seat.label],
+            }
+            for snap in self.snapshots()
+            for seat in snap.seats
+            if not seat.is_free
+        ]
+        rows.sort(key=lambda r: (-r["points"], r["group"], r["seat"]))
+        return _ranked(rows)
+
+    def group_leaderboard(self) -> list[dict]:
+        rows = [{"rank": 0, "group": snap.group_id, "points": snap.group_total} for snap in self.snapshots()]
+        rows.sort(key=lambda r: (-r["points"], r["group"]))
+        return _ranked(rows)
+
+    def export(self) -> dict:
+        return {"rounds": self.rounds, "groups": [_export_group(snap) for snap in self.snapshots()]}
+
+
+def _export_group(snap: RoomSnapshot) -> dict:
+    return {
+        "group": snap.group_id,
+        "phase": str(snap.phase),
+        "group_total": snap.group_total,
+        "seats": [
+            {"seat": s.label, "name": s.name, "bot": s.is_bot, "total": snap.totals[s.label]}
+            for s in snap.seats
+        ],
+        "rounds": [
+            {
+                "round": r.round_no,
+                "choices": {seat: str(card) for seat, card in r.choices.items()},
+                "payoffs": dict(r.payoffs),
+                "multiplier": r.multiplier,
+                "group_total": r.group_total,
+            }
+            for r in snap.history
+        ],
+    }
