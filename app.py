@@ -7,6 +7,7 @@ from wallstreet.config import Settings
 from wallstreet.room import RoomRegistry
 
 st.set_page_config(page_title="Wall Street Game", layout="wide", initial_sidebar_state="collapsed")
+st.html(views.MOBILE_CSS)
 
 
 def get_settings() -> Settings:

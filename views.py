@@ -38,6 +38,20 @@ _BIG_BUTTONS_CSS = """<style>
 .st-key-pick_X button, .st-key-pick_Y button { min-height: 6rem; }
 .st-key-pick_X button p, .st-key-pick_Y button p { font-size: 2.6rem; font-weight: 700; }
 </style>"""
+# Phones only: 640px is the width below which Streamlit itself stacks columns. Desktop is unchanged.
+MOBILE_CSS = """<style>
+@media (max-width: 640px) {
+  /* The header bar is 60px tall; Streamlit's default 96px top padding pushes the X/Y buttons off-screen. */
+  [data-testid=stMainBlockContainer] { padding-top: 3.75rem; }
+  [data-testid=stHeading] h1 { font-size: 1.75rem; line-height: 1.2; }
+  [data-testid=stHeading] h2 { font-size: 1.4rem; }
+  [data-testid=stHeading] h3 { font-size: 1.15rem; }
+  /* iOS Safari zooms into any text field whose font is smaller than 16px. */
+  [data-testid=stMain] input, [data-testid=stMain] textarea { font-size: 16px !important; }
+  /* Apple's minimum touch target is 44px. */
+  [role=radiogroup] label { min-height: 44px; padding-right: 0.75rem; }
+}
+</style>"""
 # Markdown syntax a player could smuggle in through their name (links, images, badges, headings, ...).
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]!:$<>#~|])")
 _OWN_COLUMN_STYLE = "background-color: rgba(255, 75, 75, 0.14)"
@@ -241,11 +255,12 @@ def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
         st.dataframe(
             styler,
             hide_index=True,
-            # Relative widths: the grid stretches all columns proportionally to fill the page.
             column_config={
-                "RD": st.column_config.NumberColumn("RD", width=40),
-                "Total": st.column_config.NumberColumn("Total", width=60),
-                **{seat: st.column_config.TextColumn(seat, width=150) for seat in SEATS},
+                # The narrowest widths that fit their contents, so a 375px phone shows every column
+                # (30 + 48 + 4 x 62 = 326px). On wider screens the grid shares out the extra space equally.
+                "RD": st.column_config.NumberColumn("RD", width=30),
+                "Total": st.column_config.NumberColumn("Total", width=48),
+                **{seat: st.column_config.TextColumn(seat, width=62) for seat in SEATS},
             },
         )
     st.caption(totals_line(snapshot))
@@ -338,9 +353,10 @@ def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -
         elif snapshot.phase is Phase.OPEN:
             st.caption("Everyone has chosen. Waiting for the host to reveal.")
         is_open = snapshot.phase is Phase.OPEN
-        cols = st.columns(2)
-        for col, card in zip(cols, Card, strict=True):
-            col.button(
+        # A horizontal container (unlike st.columns) keeps X and Y side by side on phones too.
+        row = st.container(horizontal=True)
+        for card in Card:
+            row.button(
                 card.value,
                 key=f"pick_{card.value}",
                 type="primary" if choice is card else "secondary",
