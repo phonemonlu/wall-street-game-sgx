@@ -70,7 +70,7 @@ class Game:
     rounds: int
     phase: Phase
     round_no: int                    # 0 in LOBBY, 1..rounds afterwards
-    def start(self) -> None          # LOBBY -> OPEN, round 1
+    def start(self) -> list[str]     # LOBBY -> OPEN, round 1; free seats become START_BOT bots
     def submit(self, seat: str, card: Card) -> None   # only in OPEN; may overwrite until reveal
     def choice_of(self, seat: str) -> Card | None     # current, unrevealed choice
     def pending_seats(self) -> list[str]
@@ -157,7 +157,7 @@ class RoomRegistry:
         # any phase: a human (or free) seat becomes a bot; the human's token is removed from the
         # index (UnknownSeat afterwards); in OPEN the bot submits at once (overriding a pending
         # human pick). GameError if already a bot / unknown strategy; UnknownSeat / UnknownGroup.
-    def start(self, group_id: int) -> None         # LOBBY->OPEN; NotReady if any seat free
+    def start(self, group_id: int) -> list[str]    # LOBBY->OPEN; free seats -> Random bots; NotReady if nobody joined
     def submit(self, token: str, card: Card) -> None
     def my_choice(self, token: str) -> Card | None
     def reveal(self, group_id: int) -> RoundRecord

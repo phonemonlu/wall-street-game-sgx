@@ -27,6 +27,7 @@ from wallstreet.strategies import STRATEGIES, SmartBot, Strategy, smart_choices
 
 MAX_GROUPS = 200
 MAX_NAME_LEN = 30
+START_BOT = "Random"  # takes every seat still free when the host starts a group
 
 
 @dataclass
@@ -124,7 +125,7 @@ class Room:
         with self.lock:
             seat = self.seat(label)
             if not seat.is_free:
-                raise SeatTaken(f"Seat {label} in group {self.group_id} is already taken.")
+                raise SeatTaken(f"Seat {player_label(self.group_id, label)} in group {self.group_id} is already taken.")
             seat.token, seat.name = token, name
             self._bump()
 
@@ -163,7 +164,7 @@ class Room:
         with self.lock:
             seat = self.seat(label)
             if seat.is_bot:
-                raise GameError(f"Seat {label} in group {self.group_id} is already a bot.")
+                raise GameError(f"Seat {player_label(self.group_id, label)} in group {self.group_id} is already a bot.")
             old_token = seat.token
             seat.token, seat.strategy, seat.name = None, factory(), f"Bot ({strategy_name})"
             if self.game.phase is Phase.OPEN:
@@ -171,15 +172,25 @@ class Room:
             self._bump()
             return old_token
 
-    def start(self) -> None:
+    def start(self) -> list[str]:
+        """LOBBY -> OPEN. Free seats become ``START_BOT`` bots first; returns their labels.
+
+        A group nobody has joined (no humans, no bots) stays in the lobby, so "Start all" does not
+        launch all-bot games in unused groups.
+        """
         with self.lock:
             if self.game.phase is not Phase.LOBBY:
                 raise InvalidTransition("The game has already started.")
-            if free := [seat.label for seat in self.seats.values() if seat.is_free]:
-                raise NotReady(f"Group {self.group_id} still has free seats: {', '.join(free)}.")
+            free = [seat for seat in self.seats.values() if seat.is_free]
+            if len(free) == len(self.seats):
+                raise NotReady(f"Nobody has joined group {self.group_id} yet.")
+            factory = _strategy_factory(START_BOT)
+            for seat in free:
+                seat.strategy, seat.name = factory(), f"Bot ({START_BOT})"
             self.game.start()
             self._bots_submit(self.seats.values())
             self._bump()
+            return [seat.label for seat in free]
 
     def submit(self, label: str, token: str, card: Card) -> None:
         with self.lock:
@@ -194,6 +205,9 @@ class Room:
 
     def reveal(self) -> RoundRecord:
         with self.lock:
+            if pending := self.game.pending_seats():  # checked here so the message has the group's numbering
+                labels = ", ".join(player_label(self.group_id, seat) for seat in pending)
+                raise NotReady(f"Group {self.group_id} is still waiting for {labels}.")
             self._smart_bots_decide()
             record = self.game.reveal()
             if self.game.phase is Phase.OVER:
@@ -391,8 +405,9 @@ class RoomRegistry:
                 with self._lock:
                     self._tokens.pop(old_token, None)
 
-    def start(self, group_id: int) -> None:
-        self._room(group_id).start()
+    def start(self, group_id: int) -> list[str]:
+        """Start the group, filling free seats with bots; returns the labels the bots took."""
+        return self._room(group_id).start()
 
     def reveal(self, group_id: int) -> RoundRecord:
         return self._room(group_id).reveal()

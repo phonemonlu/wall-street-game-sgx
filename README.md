@@ -85,8 +85,9 @@ link on your phone), where you enter your name. Play from that tab; run the game
    across groups: Group 1 is P1–P4, Group 2 is P5–P8, Group 3 is P9–P12, and so on. They can change the
    name (or, before naming, pick another seat) until the game starts. The host can fill empty
    seats with bots.
-3. Host: **Start** each group, or **Start all**. In every round, **Reveal** becomes available once
-   all four seats have chosen. Then click **Next round**.
+3. Host: **Start** each group, or **Start all**. Seats still empty at that moment become Random
+   bots; a group nobody has joined stays in the lobby. In every round, **Reveal** becomes
+   available once all four seats have chosen. Then click **Next round**.
 4. With more than one group, players get **My group** and **All groups** tabs. **All groups**
    shows every group's revealed rounds: each player's card and points, and the group total.
    Unrevealed cards are never shown.

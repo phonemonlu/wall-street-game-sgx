@@ -469,15 +469,14 @@ def test_host_group_controls_bots_and_global_actions():
     token = reg.join(1, "P1", "Ann")
     at.run()
     assert at.button(key="Reveal_1").disabled and at.button(key="Next round_1").disabled
-    at.button(key="all_Start all").click().run()
-    assert any("skipped 2 group(s)" in text for text in texts(at.info))
 
     assert at.selectbox(key="fill_strategy_1").options[:2] == ["Random", "Smart"]
     at.selectbox(key="fill_strategy_1").set_value("Smart")
     at.button(key="fill_1").click().run()
     assert [s.is_bot for s in reg.snapshot(1).seats] == [False, True, True, True]
-    at.button(key="Start_1").click().run()
-    assert reg.snapshot(1).phase is Phase.OPEN
+    at.button(key="all_Start all").click().run()
+    assert any("skipped 1 group(s)" in text and "Nobody has joined group 2" in text for text in texts(at.info))
+    assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.LOBBY
     assert at.button(key="Reveal_1").disabled  # P1 has not chosen
     assert "Ann (human) · ⏳ pending" in texts(at.caption)
 

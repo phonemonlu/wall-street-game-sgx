@@ -19,7 +19,7 @@ from wallstreet.auth import HostSessions
 from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
-from wallstreet.room import RoomRegistry, RoomSnapshot, SeatView
+from wallstreet.room import START_BOT, RoomRegistry, RoomSnapshot, SeatView
 from wallstreet.scoring import SEATS, Card, player_label
 from wallstreet.strategies import STRATEGIES
 
@@ -37,6 +37,7 @@ WAITING_FOR_GROUPS = "Waiting for the host to create groups"
 MAX_TABS = 8  # more groups than this: pick the group from a selectbox instead of one tab each
 DEFAULT_TIMER_SEC = 120
 JOIN_POLL_SEC = 2.0
+START_HELP = f"Empty seats become {START_BOT} bots. A group nobody has joined is not started."
 ALL_GROUPS_REFRESH_SEC = 3.0  # the All groups tab redraws every group's table, so refresh it less often
 FLASH_SEC = 6.0
 
@@ -584,15 +585,16 @@ def _global_controls(registry: RoomRegistry) -> None:
     with st.container(border=True):
         st.markdown("**All groups**")
         cols = st.columns(3)
-        for col, (label, action) in zip(
+        for col, (label, action, help_text) in zip(
             cols,
-            (("Start all", registry.start_all), ("Reveal all", registry.reveal_all),
-             ("Next round all", registry.next_all)),
+            (("Start all", registry.start_all, START_HELP), ("Reveal all", registry.reveal_all, None),
+             ("Next round all", registry.next_all, None)),
             strict=True,
         ):
             col.button(
                 label,
                 key=f"all_{label}",
+                help=help_text,
                 width="stretch",
                 on_click=_act,
                 args=("all", action),
@@ -649,7 +651,7 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
     for col, (label, action, enabled, help_text) in zip(
         cols,
         (
-            ("Start", registry.start, phase is Phase.LOBBY, None),
+            ("Start", registry.start, phase is Phase.LOBBY, START_HELP),
             # Reveal always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
             ("Reveal", registry.reveal, phase is Phase.OPEN and not waiting, reveal_help(snap)),
             ("Next round", registry.next_round, phase is Phase.REVEALED, None),

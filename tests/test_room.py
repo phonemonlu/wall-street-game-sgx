@@ -192,15 +192,12 @@ def test_leave_after_start_raises(reg: RoomRegistry):
     assert reg.locate(tokens["P1"]) == (1, "P1")
 
 
-def test_late_human_can_take_free_seat_and_start_needs_all(reg: RoomRegistry):
-    reg.join(1, "P1", "Ann")
-    reg.join(1, "P2", "Bob")
-    with pytest.raises(NotReady):
-        reg.start(1)
-    reg.join(1, "P3", "Cid")
-    reg.join(1, "P4", "Dee")
-    reg.start(1)
+def test_start_with_every_seat_human_adds_no_bots(reg: RoomRegistry):
+    for seat, name in zip(SEATS, ["Ann", "Bob", "Cid", "Dee"], strict=True):
+        reg.join(1, seat, name)
+    assert reg.start(1) == []
     assert reg.snapshot(1).phase is Phase.OPEN
+    assert not any(s.is_bot for s in reg.snapshot(1).seats)
 
 
 def test_late_human_may_join_free_seat_after_game_started():
@@ -545,11 +542,43 @@ def test_snapshots_in_group_order(reg: RoomRegistry):
 # -- *_all --------------------------------------------------------------------------------------
 
 
+def test_start_fills_free_seats_with_random_bots(reg: RoomRegistry):
+    token = reg.join(2, "P2", "Eve")
+    assert reg.start(2) == ["P1", "P3", "P4"]
+    snap = reg.snapshot(2)
+    assert snap.phase is Phase.OPEN
+    assert [s.name for s in snap.seats] == ["Bot (Random)", "Eve", "Bot (Random)", "Bot (Random)"]
+    assert reg._room(2).game.pending_seats() == ["P2"]  # the bots have already chosen
+    reg.submit(token, Card.X)
+    reg.reveal(2)
+
+
+def test_start_refuses_a_group_nobody_joined(reg: RoomRegistry):
+    with pytest.raises(NotReady, match="Nobody has joined group 2"):
+        reg.start(2)
+    assert reg.snapshot(2).phase is Phase.LOBBY
+    assert all(s.is_free for s in reg.snapshot(2).seats)
+
+
+def test_messages_use_numbering_across_groups(reg: RoomRegistry):
+    reg.join(2, "P1", "Eve")
+    with pytest.raises(SeatTaken, match="Seat P5 in group 2"):
+        reg.join(2, "P1", "Fay")
+    reg.replace_with_bot(2, "P2", "Always X")
+    with pytest.raises(GameError, match="Seat P6 in group 2 is already a bot"):
+        reg.replace_with_bot(2, "P2", "Always X")
+    reg.fill_with_bots(2, "Always Y")
+    reg.start(2)
+    reg._room(2).game._choices.pop("P3")  # a seat that has not chosen yet
+    with pytest.raises(NotReady, match=r"Group 2 is still waiting for P5, P7\."):
+        reg.reveal(2)
+
+
 def test_start_reveal_next_all_report_skipped(reg: RoomRegistry):
     reg.fill_with_bots(1, "Always Y")
     reg.fill_with_bots(2, "Always X")
     skipped = reg.start_all()
-    assert list(skipped) == [3] and "free seats" in skipped[3]
+    assert list(skipped) == [3] and "Nobody has joined group 3" in skipped[3]
     assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.OPEN
     skipped = reg.reveal_all()
     assert list(skipped) == [3]
