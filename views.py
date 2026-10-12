@@ -20,7 +20,7 @@ from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
 from wallstreet.room import START_BOT, RoomRegistry, RoomSnapshot, SeatView, reveal_blockers
-from wallstreet.scoring import SEATS, Card, player_label
+from wallstreet.scoring import BONUS_ROUNDS, PAYOFF, SEATS, Card, player_label
 from wallstreet.strategies import STRATEGIES
 
 TITLE = "Wall Street Game"
@@ -38,6 +38,7 @@ MAX_TABS = 8  # more groups than this: pick the group from a selectbox instead o
 DEFAULT_TIMER_SEC = 120
 JOIN_POLL_SEC = 2.0
 START_HELP = f"Empty seats become {START_BOT} bots. A group nobody has joined is not started."
+NEXT_ALL_HELP = "Opens the next round in every revealed group at once."
 # Views that draw many tables, and that nobody needs to the second, refresh less often.
 ALL_GROUPS_REFRESH_SEC = 5.0
 LEADERBOARD_REFRESH_SEC = 5.0
@@ -49,6 +50,8 @@ FLASH_SEC = 6.0
 _BIG_BUTTONS_CSS = """<style>
 .st-key-pick_X button, .st-key-pick_Y button { min-height: 6rem; }
 .st-key-pick_X button p, .st-key-pick_Y button p { font-size: 2.6rem; font-weight: 700; }
+/* The link icon Streamlit puts next to headings means nothing to players. */
+[data-testid=stHeaderActionElements] { display: none; }
 </style>"""
 # Phones only: 640px is the width below which Streamlit itself stacks columns. Desktop is unchanged.
 MOBILE_CSS = """<style>
@@ -154,6 +157,59 @@ def pending_seats(snapshot: RoomSnapshot) -> list[str]:
     return [player_label(snapshot.group_id, seat.label) for seat in snapshot.seats if not seat.submitted]
 
 
+def waiting_text(snapshot: RoomSnapshot, my_seat: str) -> str | None:
+    """``"Waiting for you, P3."`` while a round is open and someone has not chosen; else None."""
+    if snapshot.phase is not Phase.OPEN:
+        return None
+    pending = [seat.label for seat in snapshot.seats if not seat.submitted]
+    if not pending:
+        return None
+    names = ["you" if label == my_seat else player_label(snapshot.group_id, label) for label in pending]
+    return f"Waiting for {', '.join(names)}."
+
+
+def points_text(points: int) -> str:
+    """Markdown for a score: green when positive, red when negative."""
+    if points > 0:
+        return f":green[**{points:+d}**]"
+    if points < 0:
+        return f":red[**{points:+d}**]"
+    return "**0**"
+
+
+def my_result_text(snapshot: RoomSnapshot, my_seat: str) -> str | None:
+    """The player's own outcome: after a reveal, what they picked, what it scored and their total;
+    while a round is open, their total so far. None before the first reveal."""
+    if not snapshot.history:
+        return None
+    total = snapshot.totals[my_seat]
+    if snapshot.phase is Phase.OPEN:
+        return f"Your total so far: **{total}** points."
+    last = snapshot.history[-1]
+    which = "Your final total" if snapshot.phase is Phase.OVER else "Your total"
+    return (
+        f"Round {last.round_no}: you picked **{last.choices[my_seat]}** and got "
+        f"{points_text(last.payoffs[my_seat])} points. {which}: **{total}**."
+    )
+
+
+def scoring_rules(rounds: int) -> str:
+    """Markdown explaining the payoffs, built from the scoring rules so it always matches them."""
+    def cell(points: int | None) -> str:
+        return "–" if points is None else f"{points:+d}"
+
+    rows = "\n".join(f"| {n_x} | {cell(x)} | {cell(y)} |" for n_x, (x, y) in sorted(PAYOFF.items()))
+    text = (
+        "Every round, each player in your group picks X or Y. Your points depend on how many of "
+        "the four picked X:\n\n"
+        "| Players who picked X | Each X gets | Each Y gets |\n|---|---|---|\n" + rows
+    )
+    bonuses = [f"round {n} ×{factor}" for n, factor in sorted(BONUS_ROUNDS.items()) if n <= rounds]
+    if bonuses:
+        text += f"\n\nBonus rounds multiply every score: {', '.join(bonuses)}."
+    return text
+
+
 def reveal_help(snapshots: Sequence[RoomSnapshot]) -> str:
     """Tooltip for the Reveal all button: what every group is still waiting for, or that all are in."""
     return " ".join(reveal_blockers(snapshots)) or "Every group has chosen: reveals them all at once."
@@ -171,9 +227,12 @@ def seat_name(seat: SeatView) -> str:
     return md_escape(seat.name) if seat.name else "no name yet"
 
 
-def seats_line(snapshot: RoomSnapshot) -> str:
-    """``"P1 Ann · P2 Bot (Smart) · P3 free · P4 no name yet"``."""
-    return " · ".join(f"{player_label(snapshot.group_id, seat.label)} {seat_name(seat)}" for seat in snapshot.seats)
+def seats_line(snapshot: RoomSnapshot, my_seat: str | None = None) -> str:
+    """``"P1 Ann · P2 Bot (Smart) · P3 free · P4 no name yet"``; ``my_seat`` is marked "(you)"."""
+    return " · ".join(
+        f"{player_label(snapshot.group_id, seat.label)} {seat_name(seat)}{' (you)' if seat.label == my_seat else ''}"
+        for seat in snapshot.seats
+    )
 
 
 def seat_status(seat: SeatView, phase: Phase) -> str:
@@ -322,10 +381,12 @@ def _results_table(cards: str, group_id: int, title_seat: str | None, _snapshot:
         styler,
         hide_index=True,
         column_config={
-            # The narrowest widths that fit their contents, so a 375px phone shows every column
-            # (44 + 48 + 4 x 60 = 332px). On wider screens the grid shares out the extra space equally.
-            "RD": st.column_config.TextColumn("RD", width=44),
-            "Total": st.column_config.NumberColumn("Total", width=48),
+            # The narrowest widths that fit their contents, so a 375px phone shows every column.
+            # On wider screens the grid shares out the extra space equally.
+            # 52 + 48 + 4 x 60 = 340px. "Group" is the group's points that round; the Total row
+            # below is each player's sum.
+            "RD": st.column_config.TextColumn("Round", width=52),
+            "Total": st.column_config.NumberColumn("Group", width=48),
             **{label: st.column_config.TextColumn(label, width=60) for label in frame.columns[2:]},
         },
     )
@@ -409,6 +470,8 @@ def player_view(registry: RoomRegistry, settings: Settings, token: str) -> None:
         return
     st.caption(f"Playing as **{md_escape(me.name)}**. Keep this URL: it is your seat.")
     st.html(_BIG_BUTTONS_CSS)
+    with st.expander("How scoring works"):
+        st.markdown(scoring_rules(snapshot.rounds))
     if len(registry.group_ids()) > 1:
         # Only the open tab runs (and refreshes); switching tabs reruns the page.
         mine, everyone = st.tabs(["My group", "All groups"], key="player_tab", on_change="rerun")
@@ -452,7 +515,7 @@ def _name_form(registry: RoomRegistry, token: str, current: str) -> None:
 def _all_groups(registry: RoomRegistry, my_group: int, my_seat: str) -> None:
     """Every group's revealed rounds (never unrevealed cards: snapshots do not contain them)."""
     snapshots = registry.snapshots()
-    st.dataframe(overview_frame(snapshots)[["Group", "Status", "Group total"]], hide_index=True)
+    st.dataframe(overview_frame(snapshots)[["Group", "Status", "Group total"]], hide_index=True, width="content")
     for snap in snapshots:
         mine = snap.group_id == my_group
         # A fixed label keeps each expander open or closed across refreshes.
@@ -474,10 +537,13 @@ def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -
         me = next(s for s in snapshot.seats if s.label == seat)
         with st.expander("Change name"):
             _name_form(registry, token, me.name)
+    st.caption(f"Your group: {seats_line(snapshot, my_seat=seat)}")
     render_round_status(snapshot)
+    if result := my_result_text(snapshot, seat):
+        st.markdown(result)
     if snapshot.phase is not Phase.OVER:
-        if waiting := pending_seats(snapshot):
-            st.caption(f"Waiting for: {', '.join(waiting)}")
+        if waiting := waiting_text(snapshot, seat):
+            st.caption(waiting)
         elif snapshot.phase is Phase.OPEN:
             st.caption("Everyone in your group has chosen. The host reveals once every group is done.")
         is_open = snapshot.phase is Phase.OPEN
@@ -623,7 +689,7 @@ def _global_controls(registry: RoomRegistry) -> None:
                 # All or nothing: an error lists every group still waiting (this box does not refresh
                 # by itself, so the button stays clickable rather than showing a stale state).
                 ("Reveal all", registry.reveal_all, "Reveals every group at once, once every group has chosen.", None),
-                ("Next round all", registry.next_all, None, report("Next round all")),
+                ("Next round all", registry.next_all, NEXT_ALL_HELP, report("Next round all")),
             ),
             strict=True,
         ):
@@ -695,7 +761,8 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
             # Reveal is for every group at once, so it waits for all of them.
             # It always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
             ("Reveal all", registry.reveal_all, (), not reveal_blockers(snapshots), reveal_help(snapshots)),
-            ("Next round", registry.next_round, (gid,), phase is Phase.REVEALED, None),
+            # Next round also moves every group on together; groups not yet revealed are left as they are.
+            ("Next round all", registry.next_all, (), phase is Phase.REVEALED, NEXT_ALL_HELP),
         ),
         strict=True,
     ):

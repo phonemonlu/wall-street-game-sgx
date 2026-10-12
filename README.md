@@ -34,9 +34,14 @@ Players see a "Next round is a ×N bonus" hint the round before. After the round
 round is revealed, the host gets a prompt to start a negotiation break: a countdown that every
 player in the group sees.
 
-The table shows one row per revealed round: `RD | Total | P1 | P2 | P3 | P4`. A cell such as
-`Y -150` means that seat played Y and scored −150 in that round. `Total` is the group's total for
+The table shows one row per revealed round: `Round | Group | P1 | P2 | P3 | P4`. A cell such as
+`Y -150` means that seat played Y and scored −150 in that round. `Group` is the group's total for
 the round. The footer shows each seat's running total.
+
+Players also see, above the X/Y buttons, their own result after each reveal ("Round 4: you picked
+Y and got −20 points. Your total: −10.") and their total while a round is open. A **How scoring
+works** expander shows the payoff table and the bonus rounds, and "Your group" lists who sits in
+each seat. On a laptop the player page is a narrow column; the host page uses the full width.
 
 ## Quick start
 
@@ -88,7 +93,8 @@ link on your phone), where you enter your name. Play from that tab; run the game
 3. Host: **Start** each group, or **Start all**. Seats still empty at that moment become Random
    bots; a group nobody has joined stays in the lobby. In every round, **Reveal all** becomes
    available once every player in every group has chosen, and reveals all groups at once
-   (its tooltip lists who is still missing). Then click **Next round**.
+   (its tooltip lists who is still missing). Then **Next round all** (in any group's tab or the
+   **All groups** box) opens the next round for every group at once.
 4. With more than one group, players get **My group** and **All groups** tabs. **All groups**
    shows every group's revealed rounds: each player's card and points, and the group total.
    Unrevealed cards are never shown.

@@ -190,6 +190,51 @@ def test_round_label_bonus_hint_and_countdown():
     assert "- **Group 2**: nope" in views.skipped_text("Start all", {2: "nope"})
 
 
+def test_player_is_told_their_own_result_and_total():
+    reg = RoomRegistry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    reg.start(1)
+    assert views.my_result_text(reg.snapshot(1), "P1") is None  # nothing revealed yet
+    play(reg, tokens, ["XYYY"])  # one X: the X gets +30, each Y -10
+    snap = reg.snapshot(1)
+    assert views.my_result_text(snap, "P1") == "Round 1: you picked **X** and got :green[**+30**] points. Your total: **30**."
+    assert views.my_result_text(snap, "P2") == "Round 1: you picked **Y** and got :red[**-10**] points. Your total: **-10**."
+    reg.next_round(1)
+    assert views.my_result_text(reg.snapshot(1), "P2") == "Your total so far: **-10** points."
+    assert views.points_text(0) == "**0**"
+
+
+def test_waiting_text_calls_the_player_you():
+    reg = RoomRegistry()
+    reg.create_groups(2)
+    tokens = {seat: reg.join(2, seat, seat) for seat in SEATS}
+    assert views.waiting_text(reg.snapshot(2), "P1") is None  # lobby
+    reg.start(2)
+    reg.submit(tokens["P2"], Card.X)
+    assert views.waiting_text(reg.snapshot(2), "P1") == "Waiting for you, P7, P8."
+    assert views.waiting_text(reg.snapshot(2), "P2") == "Waiting for P5, P7, P8."
+    for seat in ("P1", "P3", "P4"):
+        reg.submit(tokens[seat], Card.Y)
+    assert views.waiting_text(reg.snapshot(2), "P1") is None
+
+
+def test_seats_line_marks_the_player():
+    reg = RoomRegistry()
+    reg.create_groups(1)
+    reg.join(1, "P1", "Ann")
+    assert views.seats_line(reg.snapshot(1), my_seat="P1") == "P1 Ann (you) · P2 free · P3 free · P4 free"
+    assert views.seats_line(reg.snapshot(1)) == "P1 Ann · P2 free · P3 free · P4 free"
+
+
+def test_scoring_rules_match_the_payoffs():
+    rules = views.scoring_rules(10)
+    assert "| 1 | +30 | -10 |" in rules and "| 0 | – | +10 |" in rules and "| 4 | -10 | – |" in rules
+    assert rules.endswith("Bonus rounds multiply every score: round 5 ×3, round 8 ×5, round 10 ×10.")
+    assert views.scoring_rules(6).endswith("round 5 ×3.")  # only bonus rounds that are played
+    assert "Bonus" not in views.scoring_rules(4)
+
+
 def test_player_names_cannot_inject_markdown():
     assert views.md_escape("Ann (B.)") == "Ann (B.)"
     assert views.md_escape("![x](https://evil.example/x.png)") == r"\!\[x\](https\://evil.example/x.png)"
@@ -271,13 +316,13 @@ def test_player_can_rename_in_lobby_only():
     reg.create_groups(1)
     tokens = {seat: reg.join(1, seat, f"Player {seat}") for seat in SEATS}
     at = run(seat=tokens["P1"])
-    assert [e.label for e in at.expander] == ["Change name"]
+    assert [e.label for e in at.expander] == ["How scoring works", "Change name"]
     at.text_input(key="name_input").input("Ann")
     at.button(key="FormSubmitter:name_form-Save name").click().run()
     assert reg.snapshot(1).seats[0].name == "Ann"
     reg.start(1)
     at.run()
-    assert not at.expander  # names are locked once the game starts
+    assert [e.label for e in at.expander] == ["How scoring works"]  # names are locked once the game starts
 
 
 def test_player_can_pick_another_seat_before_naming():
@@ -346,7 +391,7 @@ def test_player_sees_all_groups_tab_with_every_board():
         {"Group": 2, "Status": "Round 2 of 10", "Group total": 40},
         {"Group": 3, "Status": "Round 1 of 10", "Group total": 0},
     ]
-    assert [e.label for e in at.expander] == ["Group 1 (your group)", "Group 2", "Group 3"]
+    assert [e.label for e in at.expander] == ["How scoring works", "Group 1 (your group)", "Group 2", "Group 3"]
     boards = [df.value for df in at.dataframe[1:]]
     assert boards[0].to_dict("records") == [
         {"RD": "1", "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"},
@@ -510,7 +555,7 @@ def test_host_group_controls_bots_and_global_actions():
     reg.create_groups(2)
     token = reg.join(1, "P1", "Ann")
     at.run()
-    assert at.button(key="Reveal all_1").disabled and at.button(key="Next round_1").disabled
+    assert at.button(key="Reveal all_1").disabled and at.button(key="Next round all_1").disabled
 
     assert at.selectbox(key="fill_strategy_1").options[:2] == ["Random", "Smart"]
     at.selectbox(key="fill_strategy_1").set_value("Smart")
@@ -531,6 +576,21 @@ def test_host_group_controls_bots_and_global_actions():
     assert reg.snapshot(1).phase is Phase.REVEALED
     assert at.dataframe  # the board
     assert "Group 1 | Group total 40" in texts(at.subheader)  # an all-smart group cooperates
+
+
+def test_next_round_in_a_group_panel_opens_every_revealed_group():
+    at = run_host()
+    reg = app_registry()
+    reg.create_groups(3)
+    reg.fill_with_bots(1, "Always Y")
+    reg.fill_with_bots(2, "Always Y")
+    reg.start_all()  # group 3 has nobody in it and stays in the lobby
+    reg.reveal_all()
+    at.run()
+    assert not at.button(key="Next round all_1").disabled
+    at.button(key="Next round all_1").click().run()
+    assert [(s.phase, s.round_no) for s in reg.snapshots()] == [(Phase.OPEN, 2), (Phase.OPEN, 2), (Phase.LOBBY, 0)]
+    assert not texts(at.error)
 
 
 def test_host_draws_only_the_open_group_tab():
