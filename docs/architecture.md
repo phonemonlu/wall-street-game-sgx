@@ -90,19 +90,9 @@ class Strategy(Protocol):
     name: str
     def choose(self, seat: str, round_no: int, history: Sequence[RoundRecord]) -> Card
 ```
-Implementations: `RandomStrategy(p_x: float = 0.5, seed: int | None = None)` and `SmartBot`.
-`STRATEGIES: dict[str, Callable[[], Strategy]]` keyed by display name ("Random", "Smart").
-
-`SmartBot.choose` only places a placeholder card when a round opens, so the seat counts as
-submitted. `Room.reveal()` (under the room lock, once every seat has a card) replaces the
-placeholders with
-```python
-def smart_choices(choices: Mapping[str, Card], smart_seats: Collection[str], round_no: int) -> dict[str, Card]
-```
-which tries every card combination for the smart seats and returns the first one (seat order,
-X before Y) where no smart bot could score more for itself by switching its own card alone. The
-group total plays no part: smart bots are selfish. With PAYOFF, X strictly dominates Y for the
-player, so smart bots play X every round.
+Implementation: `RandomStrategy(p_x: float = 0.5, seed: int | None = None)`, the only bot.
+`STRATEGIES: dict[str, Callable[[], Strategy]]` keyed by display name ("Random"); tests add
+fixed-card doubles ("Always X", "Always Y") to it.
 
 ## Room & registry (`wallstreet/room.py`)
 
@@ -139,7 +129,7 @@ class Room:
     def snapshot(self) -> RoomSnapshot
     # internal helpers used by RoomRegistry; all mutations happen under self.lock (threading.RLock)
     # and bump self.version. Bots auto-submit whenever a round opens (start/next_round) and when
-    # a bot is added to an OPEN round. Smart bots re-decide at reveal (see smart_choices).
+    # a bot is added to an OPEN round.
 
 class RoomRegistry:
     def __init__(self, rounds: int = 10, clock: Callable[[], float] = time.time)

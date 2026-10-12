@@ -14,7 +14,7 @@ from wallstreet.errors import (
 from wallstreet.game import Game, Phase
 from wallstreet.room import Room, RoomRegistry, Seat, reveal_blockers
 from wallstreet.scoring import SEATS, Card
-from wallstreet.strategies import STRATEGIES, RandomStrategy, SmartBot
+from wallstreet.strategies import STRATEGIES, RandomStrategy
 
 X, Y = Card.X, Card.Y
 
@@ -265,9 +265,9 @@ def test_bot_added_to_open_round_submits_immediately():
 def test_replace_with_bot_in_lobby_invalidates_token(reg: RoomRegistry):
     token = reg.join(1, "P2", "Ann")
     v = reg.snapshot(1).version
-    reg.replace_with_bot(1, "P2", "Smart")
+    reg.replace_with_bot(1, "P2", "Random")
     seat = reg.snapshot(1).seats[1]
-    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Smart)", True, False)
+    assert (seat.name, seat.is_bot, seat.is_free) == ("Bot (Random)", True, False)
     assert reg.snapshot(1).version == v + 1
     for action in (lambda: reg.locate(token), lambda: reg.submit(token, X), lambda: reg.leave(token)):
         with pytest.raises(UnknownSeat):
@@ -342,52 +342,6 @@ def test_all_bot_strategies_play_full_games(reg: RoomRegistry):
         reg.reveal(1)
         snap = reg.snapshot(1)
         assert snap.phase is Phase.OVER and len(snap.history) == 10
-
-
-def test_smart_bots_reply_to_final_cards_at_reveal(reg: RoomRegistry):
-    token = reg.join(1, "P1", "Ann")
-    reg.fill_with_bots(1, "Smart")
-    reg.start(1)
-    assert reg.snapshot(1).seats[1].submitted  # smart seats never block the reveal
-    reg.submit(token, Y)
-    reg.submit(token, X)  # Ann changes her mind: only the final card counts
-    record = reg.reveal(1)
-    # Each bot takes the most points for itself: X, whatever Ann plays.
-    assert dict(record.choices) == {"P1": X, "P2": X, "P3": X, "P4": X}
-    reg.next_round(1)
-    reg.submit(token, Y)
-    assert dict(reg.reveal(1).choices) == {"P1": Y, "P2": X, "P3": X, "P4": X}
-
-
-def test_smart_bot_waits_for_humans(reg: RoomRegistry):
-    tokens = join_all(reg, 1)
-    reg.replace_with_bot(1, "P4", "Smart")
-    reg.start(1)
-    for label in ("P1", "P2"):
-        reg.submit(tokens[label], Y)
-    with pytest.raises(NotReady, match="P3"):
-        reg.reveal(1)
-    reg.submit(tokens["P3"], Y)
-    assert reg.reveal(1).choices["P4"] is X  # the others all played Y: X takes +30 for itself
-
-
-def test_smart_bot_replacing_a_human_mid_round(reg: RoomRegistry):
-    tokens = join_all(reg, 1)
-    reg.start(1)
-    submit_all(reg, tokens, "XYYY")
-    reg.replace_with_bot(1, "P1", "Smart")  # overrides P1's pending X
-    assert isinstance(reg._room(1).seats["P1"].strategy, SmartBot)
-    assert reg.reveal(1).choices["P1"] is X  # the others all played Y: X takes +30
-
-
-def test_smart_bots_see_random_bots(reg: RoomRegistry):
-    reg.replace_with_bot(1, "P1", "Smart")
-    reg.fill_with_bots(1, "Random")
-    reg.start(1)
-    for _ in range(9):
-        record = reg.reveal(1)
-        assert record.choices["P1"] is X
-        reg.next_round(1)
 
 
 # -- play ---------------------------------------------------------------------------------------
@@ -813,7 +767,7 @@ def test_export_numbers_seats_across_groups(reg: RoomRegistry):
     assert g2["rounds"][0]["payoffs"] == {"P5": 30, "P6": -10, "P7": -10, "P8": -10}
 
 
-# -- timer ends with its break; smart bots share the sacrifice; unnamed seats ---------------------
+# -- timer ends with its break; unnamed seats ------------------------------------------------------
 
 
 def test_timer_is_cancelled_when_the_next_round_starts():

@@ -90,11 +90,12 @@ link on your phone), where you enter your name. Play from that tab; run the game
    across groups: Group 1 is P1–P4, Group 2 is P5–P8, Group 3 is P9–P12, and so on. They can change the
    name (or, before naming, pick another seat) until the game starts. The host can fill empty
    seats with bots.
-3. Host: **Start** each group, or **Start all**. Seats still empty at that moment become Random
-   bots; a group nobody has joined stays in the lobby. In every round, **Reveal all** becomes
-   available once every player in every group has chosen, and reveals all groups at once
-   (its tooltip lists who is still missing). Then **Next round all** (in any group's tab or the
-   **All groups** box) opens the next round for every group at once.
+3. Host: the **All groups** box has the only round controls, each acting on every group at once,
+   and only the one that would do something is enabled:
+   **Start all** starts every group someone has joined (seats still empty become Random bots; a
+   group nobody has joined stays in the lobby). **Reveal all** becomes available once every player
+   in every group has chosen (its tooltip lists who is still missing). **Next all** opens the next
+   round in every revealed group.
 4. With more than one group, players get **My group** and **All groups** tabs. **All groups**
    shows every group's revealed rounds: each player's card and points, and the group total.
    Unrevealed cards are never shown.
@@ -112,17 +113,13 @@ link on your phone), where you enter your name. Play from that tab; run the game
 
 ## Bots
 
-The host can **fill free seats with bots** or **replace a seat with a bot** in any phase (for
-example, when a player leaves). Replacing a seat invalidates that player's link. If the round is
-open, the bot plays immediately.
-
-| Strategy | Plays |
-|---|---|
-| Random | X or Y with equal probability |
-| Smart | Sees the other seats' **final** cards when the host reveals, then plays the card that scores most **for itself**. It never considers the group's score. With this game's payoffs that is **X every round**: X always pays its player 20–30 points more than Y, whatever the others play. So it never loses to anyone in its group, and an all-smart group scores −10 each every round. |
-
-A smart bot always shows as "✓ submitted", so it never holds up **Reveal**. Players can change
-their card until the reveal, and the bot always answers the final cards.
+Every seat is either a player or a **Random bot**, which plays X or Y with equal probability.
+Each seat card in a group's tab has the bot control for that seat, in any phase:
+**🤖 Add bot** on a free seat, and **🤖 Make bot** on a player's seat (for example, when a player
+leaves), which opens a menu naming the player before **Replace with a Random bot**. Replacing a
+seat invalidates that player's link. If the round is open, the bot plays immediately.
+**Bots and timer** also has **Fill free seats with Random bots**.
+**Start all** also turns every seat still free into a Random bot.
 
 ## Architecture
 

@@ -167,6 +167,54 @@ def test_cached_tables_follow_the_game_not_just_the_round(monkeypatch: pytest.Mo
     assert at.dataframe[0].value.iloc[0]["P1"] == "Y +10"
 
 
+def test_results_table_shows_every_round_without_scrolling(monkeypatch: pytest.MonkeyPatch):
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    play(reg, tokens, ["XYYY"] * 10)
+    heights: list[object] = []
+    real = st.dataframe
+    monkeypatch.setattr(st, "dataframe", lambda *a, **kw: heights.append(kw.get("height")) or real(*a, **kw))
+    views._results_table.clear()  # draw it, not replay it from the cache
+    at = run(seat=tokens["P1"])
+    assert len(at.dataframe[0].value) == 11  # 10 rounds + Total
+    assert heights == ["content"]  # tall enough for all of them (the default stops at ten rows)
+
+
+def test_table_columns_are_headed_by_player_names():
+    reg = RoomRegistry()
+    reg.create_groups(2)
+    reg.join(2, "P1", "Ann")
+    reg.join(2, "P2", "Ben")
+    reg.take_seat(2, "P3")  # no name yet
+    assert views.column_headers(reg.snapshot(2)) == ("Ann", "Ben", "P7", "P8")
+    reg.fill_with_bots(2, "Random")
+    assert views.column_headers(reg.snapshot(2)) == ("Ann", "Ben", "P7", "Bot P8")
+    assert views.seat_names(reg.snapshot(2)) == ("Ann", "Ben", "no name yet", "Bot (Random)")  # hover text
+    reg.fill_with_bots(1, "Random")  # four bots: the seat number tells them apart
+    assert views.column_headers(reg.snapshot(1)) == ("Bot P1", "Bot P2", "Bot P3", "Bot P4")
+    reg.create_groups(1)
+    reg.join(1, "P1", "Sam")
+    reg.join(1, "P2", "Sam")  # two players with one name
+    assert views.column_headers(reg.snapshot(1))[:2] == ("P1 Sam", "P2 Sam")
+
+
+def test_a_new_name_in_a_seat_redraws_the_cached_table(monkeypatch: pytest.MonkeyPatch):
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    play(reg, tokens, ["XYYY"])
+    at = run(seat=tokens["P1"])
+    built: list[str] = []
+    real = views.results_frame
+    monkeypatch.setattr(views, "results_frame", lambda snap: built.append(views.results_key(snap)) or real(snap))
+    reg.replace_with_bot(1, "P2", "Random")  # names are locked once the game starts; a bot can still take over
+    at.run()
+    assert built == ["XYYY"]  # the header changed, so the table is drawn again
+
+
 def test_round_label_bonus_hint_and_countdown():
     reg = RoomRegistry()
     reg.create_groups(1)
@@ -555,30 +603,49 @@ def test_host_group_controls_bots_and_global_actions():
     reg.create_groups(2)
     token = reg.join(1, "P1", "Ann")
     at.run()
-    assert at.button(key="Reveal all_1").disabled and at.button(key="Next round all_1").disabled
+    assert not at.button(key="all_Start all").disabled
+    assert at.button(key="all_Reveal all").disabled and at.button(key="all_Next all").disabled
+    assert "Start_1" not in button_keys(at)  # no per-group round buttons any more
 
-    assert at.selectbox(key="fill_strategy_1").options[:2] == ["Random", "Smart"]
-    at.selectbox(key="fill_strategy_1").set_value("Smart")
+    assert at.button(key="fill_1").label == "Fill free seats with Random bots (3)"
     at.button(key="fill_1").click().run()
     assert [s.is_bot for s in reg.snapshot(1).seats] == [False, True, True, True]
     at.button(key="all_Start all").click().run()
     assert any("skipped 1 group(s)" in text and "Nobody has joined group 2" in text for text in texts(at.info))
     assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.LOBBY
-    assert at.button(key="Reveal all_1").disabled  # P1 has not chosen
+    assert at.button(key="all_Start all").disabled
+    assert at.button(key="all_Reveal all").disabled  # P1 has not chosen
     assert "Ann (human) · ⏳ pending" in texts(at.caption)
 
-    at.selectbox(key="replace_strategy_1").set_value("Smart")
-    at.button(key="replace_1").click().run()  # P1 is the only human seat
+    assert "addbot_1_P2" not in button_keys(at)  # bots get no control
+    at.button(key="replace_1_P1").click().run()  # inside P1's "Make bot" menu
+    assert reg.snapshot(1).seats[0].is_bot
     with pytest.raises(UnknownSeat):
         reg.locate(token)
-    assert not at.button(key="Reveal all_1").disabled  # group 2 has nobody in it, so it does not count
-    at.button(key="Reveal all_1").click().run()
+    assert not at.button(key="all_Reveal all").disabled  # group 2 has nobody in it, so it does not count
+    at.button(key="all_Reveal all").click().run()
     assert reg.snapshot(1).phase is Phase.REVEALED
     assert at.dataframe  # the board
-    assert "Group 1 | Group total -40" in texts(at.subheader)  # all-smart bots each play X: -10 each
+    assert f"Group 1 | Group total {reg.snapshot(1).group_total}" in texts(at.subheader)  # random bots
+    assert at.button(key="all_Reveal all").disabled and not at.button(key="all_Next all").disabled
 
 
-def test_next_round_in_a_group_panel_opens_every_revealed_group():
+def test_seat_cards_add_a_bot_to_a_free_seat_or_replace_a_player():
+    at = run_host()
+    reg = app_registry()
+    reg.create_groups(1)
+    reg.join(1, "P1", "Ann")
+    at.run()
+    assert {"addbot_1_P2", "addbot_1_P3", "addbot_1_P4"} <= set(button_keys(at))
+    menus = [md.value for md in at.markdown if "loses seat" in md.value]
+    assert len(menus) == 1 and menus[0].startswith("**Ann** loses seat P1")  # only Ann's seat has a menu
+    at.button(key="addbot_1_P3").click().run()  # one free seat, not all of them
+    assert [s.is_bot for s in reg.snapshot(1).seats] == [False, False, True, False]
+    assert "addbot_1_P3" not in button_keys(at)
+    assert at.button(key="fill_1").label == "Fill free seats with Random bots (2)"
+
+
+def test_next_all_opens_every_revealed_group():
     at = run_host()
     reg = app_registry()
     reg.create_groups(3)
@@ -587,10 +654,24 @@ def test_next_round_in_a_group_panel_opens_every_revealed_group():
     reg.start_all()  # group 3 has nobody in it and stays in the lobby
     reg.reveal_all()
     at.run()
-    assert not at.button(key="Next round all_1").disabled
-    at.button(key="Next round all_1").click().run()
+    at.button(key="all_Next all").click().run()
     assert [(s.phase, s.round_no) for s in reg.snapshots()] == [(Phase.OPEN, 2), (Phase.OPEN, 2), (Phase.LOBBY, 0)]
+    assert at.button(key="all_Next all").disabled
     assert not texts(at.error)
+
+
+def test_all_buttons_enabled_follows_the_game():
+    reg = RoomRegistry()
+    reg.create_groups(2)
+    assert views.all_buttons_enabled(reg.snapshots()) == (False, False, False)  # nobody has joined
+    reg.fill_with_bots(1, "Always Y")
+    assert views.all_buttons_enabled(reg.snapshots()) == (True, False, False)
+    reg.start_all()
+    assert views.all_buttons_enabled(reg.snapshots()) == (False, True, False)  # bots have chosen
+    reg.reveal_all()
+    assert views.all_buttons_enabled(reg.snapshots()) == (False, False, True)
+    reg.join(2, "P1", "Ann")  # a late group: it can be started while group 1 waits for Next all
+    assert views.all_buttons_enabled(reg.snapshots()) == (True, False, True)
 
 
 def test_host_draws_only_the_open_group_tab():
@@ -598,10 +679,10 @@ def test_host_draws_only_the_open_group_tab():
     app_registry().create_groups(2)
     at.run()
     assert [tab.label for tab in at.tabs] == ["Group 1", "Group 2", "Leaderboard"]
-    assert "Start_1" in button_keys(at) and "Start_2" not in button_keys(at)
+    assert "fill_1" in button_keys(at) and "fill_2" not in button_keys(at)
     at.session_state["host_tab"] = "Group 2"  # what a click on the tab does
     at.run()
-    assert "Start_2" in button_keys(at) and "Start_1" not in button_keys(at)
+    assert "fill_2" in button_keys(at) and "fill_1" not in button_keys(at)
 
 
 def test_host_bonus_prompt_starts_group_timer():

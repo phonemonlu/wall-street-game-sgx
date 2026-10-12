@@ -24,7 +24,7 @@ from wallstreet.errors import (
 )
 from wallstreet.game import Game, Phase, RoundRecord
 from wallstreet.scoring import SEATS, Card, multiplier, player_label
-from wallstreet.strategies import STRATEGIES, SmartBot, Strategy, smart_choices
+from wallstreet.strategies import STRATEGIES, Strategy
 
 MAX_GROUPS = 200
 MAX_NAME_LEN = 30
@@ -209,7 +209,6 @@ class Room:
             if pending := self.game.pending_seats():  # checked here so the message has the group's numbering
                 labels = ", ".join(player_label(self.group_id, seat) for seat in pending)
                 raise NotReady(f"Group {self.group_id} is still waiting for {labels}.")
-            self._smart_bots_decide()
             record = self.game.reveal()
             if self.game.phase is Phase.OVER:
                 self.timer_ends_at = None  # no more negotiating once the game is over
@@ -234,22 +233,6 @@ class Room:
             if seat.strategy is not None:
                 round_no = self.game.round_no
                 self.game.submit(seat.label, seat.strategy.choose(seat.label, round_no, history))
-
-    def _smart_bots_decide(self) -> None:
-        """Replace smart bots' placeholder cards with the card best for each, given everyone's final cards.
-
-        Runs under the room lock right before the reveal, so no human can change a card afterwards.
-        Does nothing unless every seat has chosen; game.reveal() then reports what is missing.
-        """
-        if self.game.phase is not Phase.OPEN or self.game.pending_seats():
-            return
-        smart = [seat.label for seat in self.seats.values() if isinstance(seat.strategy, SmartBot)]
-        if not smart:
-            return
-        choices = {label: self.game.choice_of(label) for label in SEATS}
-        picks = smart_choices(choices, smart, self.game.round_no)  # type: ignore[arg-type]
-        for label, card in picks.items():
-            self.game.submit(label, card)
 
     def _seat_view(self, seat: Seat) -> SeatView:
         return SeatView(

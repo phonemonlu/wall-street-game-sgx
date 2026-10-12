@@ -21,7 +21,6 @@ from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
 from wallstreet.room import START_BOT, RoomRegistry, RoomSnapshot, SeatView, reveal_blockers
 from wallstreet.scoring import BONUS_ROUNDS, PAYOFF, SEATS, Card, player_label
-from wallstreet.strategies import STRATEGIES
 
 TITLE = "Wall Street Game"
 # Page scripts, relative to app.py (routed by st.navigation there).
@@ -39,6 +38,7 @@ DEFAULT_TIMER_SEC = 120
 JOIN_POLL_SEC = 2.0
 START_HELP = f"Empty seats become {START_BOT} bots. A group nobody has joined is not started."
 NEXT_ALL_HELP = "Opens the next round in every revealed group at once."
+REVEAL_ALL_HELP_READY = "Every group has chosen: reveals them all at once."
 # Views that draw many tables, and that nobody needs to the second, refresh less often.
 ALL_GROUPS_REFRESH_SEC = 5.0
 LEADERBOARD_REFRESH_SEC = 5.0
@@ -52,6 +52,11 @@ _BIG_BUTTONS_CSS = """<style>
 .st-key-pick_X button p, .st-key-pick_Y button p { font-size: 2.6rem; font-weight: 700; }
 /* The link icon Streamlit puts next to headings means nothing to players. */
 [data-testid=stHeaderActionElements] { display: none; }
+/* Phones: no side padding inside the All groups boxes, so their results tables get the full width
+   (324px of columns, see _results_table) instead of losing the last player's column. */
+@media (max-width: 640px) {
+  [data-testid=stExpanderDetails] { padding-left: 0; padding-right: 0; }
+}
 </style>"""
 # Phones only: 640px is the width below which Streamlit itself stacks columns. Desktop is unchanged.
 MOBILE_CSS = """<style>
@@ -212,7 +217,13 @@ def scoring_rules(rounds: int) -> str:
 
 def reveal_help(snapshots: Sequence[RoomSnapshot]) -> str:
     """Tooltip for the Reveal all button: what every group is still waiting for, or that all are in."""
-    return " ".join(reveal_blockers(snapshots)) or "Every group has chosen: reveals them all at once."
+    return " ".join(reveal_blockers(snapshots)) or REVEAL_ALL_HELP_READY
+
+
+def all_buttons_enabled(snapshots: Sequence[RoomSnapshot]) -> tuple[bool, bool, bool]:
+    """Whether Start all, Reveal all and Next all would do anything right now."""
+    start = any(snap.phase is Phase.LOBBY and any(not seat.is_free for seat in snap.seats) for snap in snapshots)
+    return start, not reveal_blockers(snapshots), any(snap.phase is Phase.REVEALED for snap in snapshots)
 
 
 def md_escape(text: str) -> str:
@@ -228,7 +239,7 @@ def seat_name(seat: SeatView) -> str:
 
 
 def seats_line(snapshot: RoomSnapshot, my_seat: str | None = None) -> str:
-    """``"P1 Ann · P2 Bot (Smart) · P3 free · P4 no name yet"``; ``my_seat`` is marked "(you)"."""
+    """``"P1 Ann · P2 Bot (Random) · P3 free · P4 no name yet"``; ``my_seat`` is marked "(you)"."""
     return " · ".join(
         f"{player_label(snapshot.group_id, seat.label)} {seat_name(seat)}{' (you)' if seat.label == my_seat else ''}"
         for seat in snapshot.seats
@@ -236,7 +247,7 @@ def seats_line(snapshot: RoomSnapshot, my_seat: str | None = None) -> str:
 
 
 def seat_status(seat: SeatView, phase: Phase) -> str:
-    """``"Bot (Smart) · ✓ submitted"`` / ``"Ann · pending"`` / ``"free"``."""
+    """``"Bot (Random) · ✓ submitted"`` / ``"Ann · pending"`` / ``"free"``."""
     if seat.is_free:
         return "free"
     who = seat.name if seat.is_bot else f"{seat_name(seat)} (human)"
@@ -349,20 +360,45 @@ def results_key(snapshot: RoomSnapshot) -> str:
     return " ".join("".join(str(record.choices[seat]) for seat in SEATS) for record in snapshot.history)
 
 
+def column_headers(snapshot: RoomSnapshot) -> tuple[str, ...]:
+    """The results table's seat column headers, short enough for a phone (56px columns): each
+    player's name (``"Ann"``), the seat number while a seat has no name, ``"Bot P6"`` for a bot
+    (the hover text gives its full name) and ``"P5 Ann"`` when two players share a name."""
+    def header(seat: SeatView) -> str:
+        label = player_label(snapshot.group_id, seat.label)
+        if seat.is_bot:
+            return f"Bot {label}"
+        if not seat.name:
+            return label
+        if sum(other.name == seat.name for other in snapshot.seats) > 1:
+            return f"{label} {seat.name}"
+        return seat.name
+
+    return tuple(header(seat) for seat in snapshot.seats)
+
+
+def seat_names(snapshot: RoomSnapshot) -> tuple[str, ...]:
+    """Every seat's full name for hover text: ``"Ann"``, ``"Bot (Random)"``, ``"no name yet"``."""
+    return tuple(seat.name or ("free" if seat.is_free else "no name yet") for seat in snapshot.seats)
+
+
 def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
     """The results table: bonus rows tinted, ``title_seat``'s column highlighted, the Total row last."""
     if not snapshot.history:
         st.caption("No rounds revealed yet.")
         return
     own_seat = title_seat if title_seat in SEATS else None
-    _results_table(results_key(snapshot), snapshot.group_id, own_seat, _snapshot=snapshot)
+    _results_table(results_key(snapshot), snapshot.group_id, own_seat, column_headers(snapshot), _snapshot=snapshot)
 
 
 @st.cache_data(max_entries=TABLE_CACHE_ENTRIES, show_spinner=False)
-def _results_table(cards: str, group_id: int, title_seat: str | None, _snapshot: RoomSnapshot) -> None:
+def _results_table(
+    cards: str, group_id: int, title_seat: str | None, headers: tuple[str, ...], _snapshot: RoomSnapshot
+) -> None:
     """Draws the styled table. Cached on what it shows, so the refreshes of every session replay the
     finished element instead of converting the pandas Styler again, the costliest part of a refresh.
-    (``_snapshot`` is left out of the cache key: ``cards`` and ``group_id`` already determine it.)
+    (``_snapshot`` is left out of the cache key: ``cards``, ``group_id`` and ``headers`` already
+    determine what is drawn.)
     """
     snapshot = _snapshot
     frame = results_frame(snapshot)
@@ -380,14 +416,21 @@ def _results_table(cards: str, group_id: int, title_seat: str | None, _snapshot:
     st.dataframe(
         styler,
         hide_index=True,
+        # Every round and the Total row at once (the default shows ten rows, then scrolls; a table
+        # cannot freeze a row). At most 10 rounds + Total, so it stays short.
+        height="content",
         column_config={
             # The narrowest widths that fit their contents, so a 375px phone shows every column.
             # On wider screens the grid shares out the extra space equally.
-            # 52 + 48 + 4 x 60 = 340px. "Group" is the group's points that round; the Total row
-            # below is each player's sum.
+            # 52 + 48 + 4 x 56 = 324px: fits a 360px phone (328px of page). "Group" is the group's
+            # points that round; the Total row below is each player's sum.
             "RD": st.column_config.TextColumn("Round", width=52),
             "Total": st.column_config.NumberColumn("Group", width=48),
-            **{label: st.column_config.TextColumn(label, width=60) for label in frame.columns[2:]},
+            # Headed by the players' names; the hover text gives the seat number too.
+            **{
+                label: st.column_config.TextColumn(header, width=56, help=f"{label}: {name}")
+                for label, header, name in zip(frame.columns[2:], headers, seat_names(snapshot), strict=True)
+            },
         },
     )
 
@@ -622,7 +665,7 @@ def host_view(registry: RoomRegistry, settings: Settings) -> None:
     group_ids = registry.group_ids()
     _setup(registry, group_ids)
     if group_ids:
-        _global_controls(registry)
+        _global_controls(registry, settings)
         _host_play(registry)
         _groups_area(registry, settings, group_ids)
     else:
@@ -675,33 +718,10 @@ def _create_groups(registry: RoomRegistry) -> None:
     st.session_state["setup_replace"] = False
 
 
-def _global_controls(registry: RoomRegistry) -> None:
+def _global_controls(registry: RoomRegistry, settings: Settings) -> None:
     with st.container(border=True):
         st.markdown("**All groups**")
-        def report(label: str) -> Callable[[dict[int, str]], str]:
-            return lambda skipped: skipped_text(label, skipped)
-
-        cols = st.columns(3)
-        for col, (label, action, help_text, done) in zip(
-            cols,
-            (
-                ("Start all", registry.start_all, START_HELP, report("Start all")),
-                # All or nothing: an error lists every group still waiting (this box does not refresh
-                # by itself, so the button stays clickable rather than showing a stale state).
-                ("Reveal all", registry.reveal_all, "Reveals every group at once, once every group has chosen.", None),
-                ("Next round all", registry.next_all, NEXT_ALL_HELP, report("Next round all")),
-            ),
-            strict=True,
-        ):
-            col.button(
-                label,
-                key=f"all_{label}",
-                help=help_text,
-                width="stretch",
-                on_click=_act,
-                args=("all", action),
-                kwargs={"done": done},
-            )
+        _live(_game_buttons, settings)(registry)
         secs_col, start_col, clear_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         secs_col.number_input(
             "Negotiation timer (seconds)", min_value=10, max_value=3600, value=DEFAULT_TIMER_SEC, step=10,
@@ -713,6 +733,29 @@ def _global_controls(registry: RoomRegistry) -> None:
         )
         clear_col.button("Clear", key="timer_all_clear", width="stretch", on_click=_act, args=("all", registry.clear_timer))
         _show_flash("all")
+
+
+def _game_buttons(registry: RoomRegistry) -> None:
+    """Start all, Reveal all and Next all: the only round controls, each for every group at once.
+    Refreshes with the game, so only the buttons that would do something are enabled."""
+    snapshots = registry.snapshots()
+    def report(skipped: dict[int, str]) -> str:
+        return skipped_text("Start all", skipped)
+
+    buttons = (
+        ("Start all", registry.start_all, START_HELP, report),
+        # It always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
+        ("Reveal all", registry.reveal_all, reveal_help(snapshots), None),
+        ("Next all", registry.next_all, NEXT_ALL_HELP, None),
+    )
+    for col, (label, action, help_text, done), enabled in zip(
+        st.columns(3), buttons, all_buttons_enabled(snapshots), strict=True
+    ):
+        col.button(
+            label, key=f"all_{label}", type="primary" if enabled else "secondary", disabled=not enabled,
+            help=help_text, width="stretch", on_click=_act, args=("game", action), kwargs={"done": done},
+        )
+    _show_flash("game")
 
 
 def _groups_area(registry: RoomRegistry, settings: Settings, group_ids: list[int]) -> None:
@@ -751,25 +794,7 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
         with col.container(border=True):
             st.markdown(f"**{player_label(gid, seat.label)}**{' 🤖' if seat.is_bot else ''}")
             st.caption(seat_status(seat, phase))
-
-    snapshots = registry.snapshots()
-    cols = st.columns(3)
-    for col, (label, action, args, enabled, help_text) in zip(
-        cols,
-        (
-            ("Start", registry.start, (gid,), phase is Phase.LOBBY, START_HELP),
-            # Reveal is for every group at once, so it waits for all of them.
-            # It always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
-            ("Reveal all", registry.reveal_all, (), not reveal_blockers(snapshots), reveal_help(snapshots)),
-            # Next round also moves every group on together; groups not yet revealed are left as they are.
-            ("Next round all", registry.next_all, (), phase is Phase.REVEALED, NEXT_ALL_HELP),
-        ),
-        strict=True,
-    ):
-        col.button(
-            label, key=f"{label}_{gid}", type="primary" if enabled else "secondary", disabled=not enabled,
-            help=help_text, width="stretch", on_click=_act, args=(f"g{gid}", action, *args),
-        )
+            _seat_bot_control(registry, gid, seat)
 
     secs = _Widget(f"timer_secs_{gid}", DEFAULT_TIMER_SEC)
     # Hidden once a timer is running (the break has started); next_round cancels the timer.
@@ -801,31 +826,31 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
     render_board(snap)
 
 
-def _bot_controls(registry: RoomRegistry, snap: RoomSnapshot) -> None:
-    gid = snap.group_id
-    strategies = list(STRATEGIES)
-    free = [s.label for s in snap.seats if s.is_free]
-    humans = [s.label for s in snap.seats if not s.is_free and not s.is_bot]
+def _seat_bot_control(registry: RoomRegistry, gid: int, seat: SeatView) -> None:
+    """On each seat card: a free seat gets a bot in one click; a player's seat goes through a small
+    menu that names who loses it, so a stray tap cannot replace anyone. Bots need nothing."""
+    replace = (f"g{gid}", registry.replace_with_bot, gid, seat.label, START_BOT)
+    if seat.is_free:
+        st.button("🤖 Add bot", key=f"addbot_{gid}_{seat.label}", width="stretch", on_click=_act, args=replace)
+    elif not seat.is_bot:
+        # A key keeps the menu open while the panel refreshes every second.
+        with st.popover("🤖 Make bot", key=f"botmenu_{gid}_{seat.label}", width="stretch"):
+            st.markdown(
+                f"**{seat_name(seat)}** loses seat {player_label(gid, seat.label)} and their link stops "
+                f"working. A {START_BOT} bot plays from now on."
+            )
+            st.button(
+                f"Replace with a {START_BOT} bot", key=f"replace_{gid}_{seat.label}", type="primary",
+                on_click=_act, args=replace,
+            )
 
-    fill_col, replace_col = st.columns(2)
-    with fill_col:
-        st.selectbox("Bot strategy for free seats", strategies, key=f"fill_strategy_{gid}")
-        st.button(
-            f"Fill free seats with bots ({len(free)})", key=f"fill_{gid}", disabled=not free,
-            on_click=_act, args=(f"g{gid}", registry.fill_with_bots, gid, _Widget(f"fill_strategy_{gid}")),
-        )
-    with replace_col:
-        seat_col, strat_col = st.columns(2)
-        seat_col.selectbox(
-            "Seat", humans or ["–"], key=f"replace_seat_{gid}", disabled=not humans,
-            format_func=lambda label: player_label(gid, label) if label in SEATS else label,
-        )
-        strat_col.selectbox("Strategy", strategies, key=f"replace_strategy_{gid}")
-        st.button(
-            "Replace seat with bot", key=f"replace_{gid}", disabled=not humans,
-            on_click=_act, args=(f"g{gid}", registry.replace_with_bot, gid, _Widget(f"replace_seat_{gid}"),
-                  _Widget(f"replace_strategy_{gid}")),
-        )
+
+def _bot_controls(registry: RoomRegistry, snap: RoomSnapshot) -> None:
+    free = [s.label for s in snap.seats if s.is_free]
+    st.button(
+        f"Fill free seats with {START_BOT} bots ({len(free)})", key=f"fill_{snap.group_id}", disabled=not free,
+        on_click=_act, args=(f"g{snap.group_id}", registry.fill_with_bots, snap.group_id, START_BOT),
+    )
 
 
 def _leaderboard(registry: RoomRegistry) -> None:
