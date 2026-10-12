@@ -575,7 +575,7 @@ def test_host_group_controls_bots_and_global_actions():
     at.button(key="Reveal all_1").click().run()
     assert reg.snapshot(1).phase is Phase.REVEALED
     assert at.dataframe  # the board
-    assert "Group 1 | Group total 40" in texts(at.subheader)  # an all-smart group cooperates
+    assert "Group 1 | Group total -40" in texts(at.subheader)  # all-smart bots each play X: -10 each
 
 
 def test_next_round_in_a_group_panel_opens_every_revealed_group():

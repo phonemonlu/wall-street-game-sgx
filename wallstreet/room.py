@@ -236,7 +236,7 @@ class Room:
                 self.game.submit(seat.label, seat.strategy.choose(seat.label, round_no, history))
 
     def _smart_bots_decide(self) -> None:
-        """Replace smart bots' placeholder cards with their best reply to everyone's final cards.
+        """Replace smart bots' placeholder cards with the card best for each, given everyone's final cards.
 
         Runs under the room lock right before the reveal, so no human can change a card afterwards.
         Does nothing unless every seat has chosen; game.reveal() then reports what is missing.
@@ -247,7 +247,7 @@ class Room:
         if not smart:
             return
         choices = {label: self.game.choice_of(label) for label in SEATS}
-        picks = smart_choices(choices, smart, self.game.round_no, self.game.totals())  # type: ignore[arg-type]
+        picks = smart_choices(choices, smart, self.game.round_no)  # type: ignore[arg-type]
         for label, card in picks.items():
             self.game.submit(label, card)
 

@@ -119,7 +119,7 @@ open, the bot plays immediately.
 | Strategy | Plays |
 |---|---|
 | Random | X or Y with equal probability |
-| Smart | Sees the other seats' **final** cards when the host reveals, then plays the best reply: the highest group total first, then its own score. On its own that means **X**, unless the other three all chose the same card, then **Y** (it gives up 20 points so the group gets +40 instead of 0, or 0 instead of −40). Several smart bots in one group choose together as a team; when they must split their cards, the bot that would end up richest takes the worse one, so they take turns. An all-smart group plays Y every round. |
+| Smart | Sees the other seats' **final** cards when the host reveals, then plays the card that scores most **for itself**. It never considers the group's score. With this game's payoffs that is **X every round**: X always pays its player 20–30 points more than Y, whatever the others play. So it never loses to anyone in its group, and an all-smart group scores −10 each every round. |
 
 A smart bot always shows as "✓ submitted", so it never holds up **Reveal**. Players can change
 their card until the reveal, and the bot always answers the final cards.

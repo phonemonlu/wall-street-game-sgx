@@ -55,47 +55,46 @@ def smart(text: str, team: str, round_no: int = 1) -> str:
     return "".join(str(picked[seat]) for seat in sorted(picked))
 
 
-@pytest.mark.parametrize(
-    ("others", "expected"),
-    [
-        ("YYY", "Y"),  # all Y: Y keeps the group at +40 (X: +30 for itself, but group 0)
-        ("XYY", "X"),  # mixed: the group total is 0 either way, so take the points
-        ("YXY", "X"),
-        ("XXY", "X"),
-        ("XXX", "Y"),  # all X: Y saves the group 40 (group 0 instead of -40)
-    ],
-)
-def test_lone_smart_bot_protects_group_then_maximises_own_score(others: str, expected: str):
-    assert smart("?" + others, "1") == expected
-    assert smart(others + "?", "4") == expected
+@pytest.mark.parametrize("others", ["".join(cards) for cards in product("XY", repeat=3)])
+def test_lone_smart_bot_always_takes_the_most_points_for_itself(others: str):
+    # X pays its player 20-30 more than Y whatever the others play, even when all three others
+    # play Y (X: +30 for the bot, the group drops from +40 to 0) or all X (X: -10 instead of -30).
+    assert smart("?" + others, "1") == "X"
+    assert smart(others + "?", "4") == "X"
     for round_no in (5, 8, 10):  # bonus multipliers scale everything equally
-        assert smart("?" + others, "1", round_no) == expected
+        assert smart("?" + others, "1", round_no) == "X"
 
 
-def test_lone_smart_bot_never_loses_to_a_human_in_its_group():
-    """Over every possible table, the smart bot's score is at least that of each human, unless it
-    gave up points to protect the group (others unanimous)."""
+def test_lone_smart_bot_never_scores_below_anyone_in_its_group():
     for others in product(Card, repeat=3):
         table = dict(zip(SEATS[1:], others, strict=True))
         pick = smart_choices(table, ["P1"], 1)
         payoffs = score_round({**table, **pick}, 1)
-        if len(set(others)) > 1:
-            assert payoffs["P1"] == max(payoffs.values())
+        assert payoffs["P1"] == max(payoffs.values())
 
 
 @pytest.mark.parametrize(
     ("table", "team", "expected"),
     [
-        ("??YY", "12", "YY"),  # humans cooperate: the team keeps the +40 table
-        ("??XY", "12", "XX"),  # group 0 whatever the team does: take 20 + 20
-        ("??XX", "12", "XY"),  # one X, one Y keeps the group at 0 (not -40); ties go to the lowest seat
-        ("?Y??", "134", "YYY"),
-        ("?X??", "134", "XXY"),
-        ("????", "1234", "YYYY"),  # an all-smart group cooperates every round
+        ("??YY", "12", "XX"),
+        ("??XX", "12", "XX"),
+        ("?Y??", "134", "XXX"),
+        ("????", "1234", "XXXX"),  # an all-smart group never cooperates: -10 each, every round
     ],
 )
-def test_smart_bots_act_as_a_team(table: str, team: str, expected: str):
+def test_several_smart_bots_each_play_for_themselves(table: str, team: str, expected: str):
     assert smart(table, team) == expected
+
+
+def test_no_smart_bot_could_score_more_by_switching_alone():
+    for text in ("".join(cards) for cards in product("XY?", repeat=4)):
+        team = [seat for seat, c in zip(SEATS, text, strict=True) if c == "?"]
+        table = {seat: Card(c) for seat, c in zip(SEATS, text, strict=True) if c != "?"}
+        pick = smart_choices(table, team, 1)
+        current = score_round({**table, **pick}, 1)
+        for seat in team:
+            switched = {**table, **pick, seat: Y if pick[seat] is X else X}
+            assert score_round(switched, 1)[seat] <= current[seat]
 
 
 def test_smart_choices_without_smart_seats_is_empty():
@@ -106,10 +105,3 @@ def test_smart_bot_placeholder_is_a_valid_card():
     assert SmartBot().choose("P1", 1, []) in (X, Y)
 
 
-def test_team_split_gives_the_worse_card_to_the_richer_bot():
-    table = {"P1": X, "P2": X}  # the pair must split X/Y to keep the group at 0
-    assert smart_choices(table, ["P3", "P4"], 1) == {"P3": X, "P4": Y}  # tie: first seat gets X
-    assert smart_choices(table, ["P3", "P4"], 1, {"P3": 40, "P4": 0}) == {"P3": Y, "P4": X}
-    assert smart_choices(table, ["P3", "P4"], 1, {"P3": 0, "P4": 40}) == {"P3": X, "P4": Y}
-    # Fairness never costs the group or the team: same cards as before when nothing is split.
-    assert smart_choices({"P1": Y, "P2": Y}, ["P3", "P4"], 1, {"P3": 90, "P4": 0}) == {"P3": Y, "P4": Y}

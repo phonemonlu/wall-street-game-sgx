@@ -352,11 +352,11 @@ def test_smart_bots_reply_to_final_cards_at_reveal(reg: RoomRegistry):
     reg.submit(token, Y)
     reg.submit(token, X)  # Ann changes her mind: only the final card counts
     record = reg.reveal(1)
-    # Against one X the team keeps the group at 0 (not -40) and takes the most points: X, X, Y.
-    assert dict(record.choices) == {"P1": X, "P2": X, "P3": X, "P4": Y}
+    # Each bot takes the most points for itself: X, whatever Ann plays.
+    assert dict(record.choices) == {"P1": X, "P2": X, "P3": X, "P4": X}
     reg.next_round(1)
     reg.submit(token, Y)
-    assert dict(reg.reveal(1).choices) == {"P1": Y, "P2": Y, "P3": Y, "P4": Y}
+    assert dict(reg.reveal(1).choices) == {"P1": Y, "P2": X, "P3": X, "P4": X}
 
 
 def test_smart_bot_waits_for_humans(reg: RoomRegistry):
@@ -368,7 +368,7 @@ def test_smart_bot_waits_for_humans(reg: RoomRegistry):
     with pytest.raises(NotReady, match="P3"):
         reg.reveal(1)
     reg.submit(tokens["P3"], Y)
-    assert reg.reveal(1).choices["P4"] is Y  # the others all played Y: protect the +40
+    assert reg.reveal(1).choices["P4"] is X  # the others all played Y: X takes +30 for itself
 
 
 def test_smart_bot_replacing_a_human_mid_round(reg: RoomRegistry):
@@ -377,7 +377,7 @@ def test_smart_bot_replacing_a_human_mid_round(reg: RoomRegistry):
     submit_all(reg, tokens, "XYYY")
     reg.replace_with_bot(1, "P1", "Smart")  # overrides P1's pending X
     assert isinstance(reg._room(1).seats["P1"].strategy, SmartBot)
-    assert reg.reveal(1).choices["P1"] is Y  # the others all played Y
+    assert reg.reveal(1).choices["P1"] is X  # the others all played Y: X takes +30
 
 
 def test_smart_bots_see_random_bots(reg: RoomRegistry):
@@ -386,9 +386,7 @@ def test_smart_bots_see_random_bots(reg: RoomRegistry):
     reg.start(1)
     for _ in range(9):
         record = reg.reveal(1)
-        others = [record.choices[s] for s in SEATS[1:]]
-        expected = Y if len(set(others)) == 1 else X
-        assert record.choices["P1"] is expected
+        assert record.choices["P1"] is X
         reg.next_round(1)
 
 
@@ -850,23 +848,6 @@ def test_timer_survives_a_reveal_that_does_not_end_the_game(reg: RoomRegistry):
     reg.start_timer(60, 1)  # started while the round is open
     reg.reveal(1)
     assert reg.snapshot(1).timer_ends_at is not None
-
-
-def test_smart_bots_take_turns_with_the_worse_card(reg: RoomRegistry):
-    tokens = {seat: reg.join(1, seat, seat) for seat in ("P1", "P2")}
-    reg.fill_with_bots(1, "Smart")
-    reg.start(1)
-    sacrificed = []
-    for _ in range(4):
-        for token in tokens.values():
-            reg.submit(token, X)  # two X: the smart pair must split (X, Y) to keep the group at 0
-        record = reg.reveal(1)
-        assert sorted(str(record.choices[s]) for s in ("P3", "P4")) == ["X", "Y"]
-        sacrificed.append(next(s for s in ("P3", "P4") if record.choices[s] is Y))
-        reg.next_round(1)
-    assert sacrificed == ["P4", "P3", "P4", "P3"]  # the richer bot takes the Y each time
-    totals = reg.snapshot(1).totals
-    assert totals["P3"] == totals["P4"]
 
 
 def test_unnamed_seat_shows_its_seat_number_in_leaderboard_and_export(reg: RoomRegistry):
