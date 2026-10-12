@@ -4,6 +4,15 @@ base = "dark"
 [server]
 headless = true
 runOnSave = false
+# No watching of source files for changes. Each session otherwise keeps checking the file of every
+# loaded module (pandas, pyarrow, ...), which used most of the server's CPU with many phones polling.
+# For auto-reload while developing: streamlit run app.py --server.fileWatcherType auto
+fileWatcherType = "none"
+
+[runner]
+# No full garbage collection after every script run. With phones refreshing every second it costs
+# more than the game itself; Python's automatic garbage collection still runs.
+postScriptGC = false
 
 [browser]
 gatherUsageStats = false

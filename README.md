@@ -181,7 +181,10 @@ docker compose --profile loadtest run --rm stress
   its live part every `WSG_REFRESH_SEC` seconds, so raise that value for very large sessions. To keep
   each rerun cheap, only the selected tab of a page is drawn and refreshed, the All groups tab and the
   Leaderboard refresh every 5 seconds, and finished results tables are cached and shared by every
-  session until the next reveal. The stress test above measures the registry alone, without Streamlit.
+  session until the next reveal. `.streamlit/config.toml` also turns off Streamlit's source-file
+  watcher and its garbage collection after every run, which together cut the server's CPU about
+  7× with 16 phones (run with `--server.fileWatcherType auto` to get auto-reload while developing).
+  The stress test above measures the registry alone, without Streamlit.
 
 ## Troubleshooting
 
