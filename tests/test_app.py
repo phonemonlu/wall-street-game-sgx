@@ -99,20 +99,20 @@ def screenshot_registry() -> tuple[RoomRegistry, dict[str, str]]:
 # -- pure helpers -------------------------------------------------------------------------------
 
 
-def test_results_frame_and_totals_line_for_screenshot_game():
+def test_results_frame_and_total_row_for_screenshot_game():
     reg, _ = screenshot_registry()
     snap = reg.snapshot(1)
     frame = views.results_frame(snap)
     assert list(frame.columns) == ["RD", "Total", "P1", "P2", "P3", "P4"]
-    assert list(frame["RD"]) == list(range(1, 11))
-    assert frame.iloc[0].to_dict() == {"RD": 1, "Total": 0, "P1": "X +10", "P2": "Y -30", "P3": "X +10", "P4": "X +10"}
-    row8 = frame[frame["RD"] == 8].iloc[0]
+    assert list(frame["RD"]) == [str(n) for n in range(1, 11)] + ["Total"]
+    assert frame.iloc[0].to_dict() == {"RD": "1", "Total": 0, "P1": "X +10", "P2": "Y -30", "P3": "X +10", "P4": "X +10"}
+    row8 = frame[frame["RD"] == "8"].iloc[0]
     assert row8["P1"] == "Y -150" and row8["P2"] == "X +50" and row8["Total"] == 0
-    row10 = frame[frame["RD"] == 10].iloc[0]
+    row10 = frame[frame["RD"] == "10"].iloc[0]
     assert row10["P1"] == "X +300" and row10["P4"] == "Y -100"
-    assert list(frame["Total"]) == [record.group_total for record in snap.history]
-    assert frame["Total"].sum() == snap.group_total == 0
-    assert views.totals_line(snap) == "P1: 270 P2: -90 P3: -50 P4: -130"
+    assert list(frame["Total"])[:-1] == [record.group_total for record in snap.history]
+    assert frame["Total"][:-1].sum() == snap.group_total == 0
+    assert frame.iloc[-1].to_dict() == {"RD": "Total", "Total": 0, "P1": "270", "P2": "-90", "P3": "-50", "P4": "-130"}
 
 
 def test_results_frame_only_covers_revealed_rounds():
@@ -121,14 +121,16 @@ def test_results_frame_only_covers_revealed_rounds():
     tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
     snap = reg.snapshot(1)
     assert views.results_frame(snap).empty
-    assert list(views.results_frame(snap).columns) == ["RD", "Total", *SEATS]
-    assert views.totals_line(snap) == "P1: 0 P2: 0 P3: 0 P4: 0"
+    assert list(views.results_frame(snap).columns) == ["RD", "Total", *SEATS]  # no Total row yet
     play(reg, tokens, ["YYYY"])
     reg.next_round(1)
     for seat in ("P1", "P2", "P3"):  # round 2 open with cards in: still hidden
         reg.submit(tokens[seat], Card.X)
     frame = views.results_frame(reg.snapshot(1))
-    assert frame.to_dict("records") == [{"RD": 1, "Total": 40, "P1": "Y +10", "P2": "Y +10", "P3": "Y +10", "P4": "Y +10"}]
+    assert frame.to_dict("records") == [
+        {"RD": "1", "Total": 40, "P1": "Y +10", "P2": "Y +10", "P3": "Y +10", "P4": "Y +10"},
+        {"RD": "Total", "Total": 40, "P1": "10", "P2": "10", "P3": "10", "P4": "10"},
+    ]
 
 
 def test_round_label_bonus_hint_and_countdown():
@@ -308,14 +310,16 @@ def test_player_sees_all_groups_tab_with_every_board():
     ]
     assert [e.label for e in at.expander] == ["Group 1 (your group)", "Group 2", "Group 3"]
     boards = [df.value for df in at.dataframe[2:]]
-    assert boards[0].to_dict("records") == [{"RD": 1, "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"}]
+    assert boards[0].to_dict("records") == [
+        {"RD": "1", "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"},
+        {"RD": "Total", "Total": 0, "P1": "30", "P2": "-10", "P3": "-10", "P4": "-10"},
+    ]
     assert list(boards[1].columns) == ["RD", "Total", "P5", "P6", "P7", "P8"]
-    assert list(boards[1]["P5"]) == ["Y +10", "X +20"]
+    assert list(boards[1]["P5"]) == ["Y +10", "X +20", "30"]
+    assert boards[1].iloc[-1].to_dict() == {"RD": "Total", "Total": 40, "P5": "30", "P6": "30", "P7": "-10", "P8": "-10"}
     assert len(boards) == 2  # group 3 has nothing revealed
     assert "No rounds revealed yet." in texts(at.caption)
     assert "P5 G2P1 · P6 G2P2 · P7 G2P3 · P8 G2P4" in texts(at.caption)
-    assert "P1: 30 P2: -10 P3: -10 P4: -10" in texts(at.caption)
-    assert "P5: 30 P6: 30 P7: -10 P8: -10" in texts(at.caption)
 
 
 def test_single_group_has_no_all_groups_tab():
@@ -557,9 +561,10 @@ def test_player_picks_inside_fragment_and_sees_board_at_game_over():
     at.run()
     assert texts(at.header) == ["P1 | Group 1", "Game over"]
     assert texts(at.subheader) == ["Group 1 | Group total 0"]
-    assert "P1: 270 P2: -90 P3: -50 P4: -130" in texts(at.caption)
     assert not at.button  # no X/Y buttons once the game is over
-    assert len(at.dataframe[0].value) == 10
+    board = at.dataframe[0].value
+    assert len(board) == 11  # 10 rounds + the Total row
+    assert board.iloc[-1].to_dict() == {"RD": "Total", "Total": 0, "P1": "270", "P2": "-90", "P3": "-50", "P4": "-130"}
 
 
 def test_player_seat_handed_to_bot_shows_error():

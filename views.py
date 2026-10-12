@@ -1,6 +1,6 @@
 """Streamlit render functions. Thin by design: game rules live in ``wallstreet``.
 
-The pure helpers at the top (``results_frame``, ``totals_line``, ...) never touch streamlit and are
+The pure helpers at the top (``results_frame``, ``round_label``, ...) never touch streamlit and are
 unit-tested directly; the ``render_*`` / ``*_view`` functions only draw what they return.
 Everything that changes while people play is drawn inside ``st.fragment(run_every=...)`` so only
 that part of the page refreshes.
@@ -63,31 +63,38 @@ MOBILE_CSS = """<style>
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]!:$<>#~|])")
 _OWN_COLUMN_STYLE = "background-color: rgba(255, 75, 75, 0.14)"
 _BONUS_ROW_STYLE = "background-color: rgba(255, 170, 0, 0.10)"
+_TOTAL_ROW_STYLE = "background-color: rgba(128, 128, 128, 0.25); font-weight: bold"
+TOTAL_ROW = "Total"
 
 
 # -- pure helpers (no streamlit) ------------------------------------------------------------------
 
 
 def results_frame(snapshot: RoomSnapshot) -> pd.DataFrame:
-    """One row per *revealed* round: ``RD | Total | P1..P4`` with cells like ``"X +10"``.
+    """One row per *revealed* round: ``RD | Total | P1..P4`` with cells like ``"X +10"``, then a
+    ``TOTAL_ROW`` with each player's score so far and the group total (no rows before the first reveal).
 
-    Seat columns use the players' numbers across groups (Group 2: ``P5..P8``).
+    Seat columns use the players' numbers across groups (Group 2: ``P5..P8``). RD is text because
+    the last row's RD is ``"Total"`` (a column mixing numbers and text cannot be sent to the browser).
     """
     labels = {seat: player_label(snapshot.group_id, seat) for seat in SEATS}
     rows = [
         {
-            "RD": record.round_no,
+            "RD": str(record.round_no),
             "Total": record.group_total,
             **{label: f"{record.choices[seat]} {record.payoffs[seat]:+d}" for seat, label in labels.items()},
         }
         for record in snapshot.history
     ]
+    if rows:
+        rows.append(
+            {
+                "RD": TOTAL_ROW,
+                "Total": snapshot.group_total,
+                **{label: str(snapshot.totals[seat]) for seat, label in labels.items()},
+            }
+        )
     return pd.DataFrame(rows, columns=["RD", "Total", *labels.values()])
-
-
-def totals_line(snapshot: RoomSnapshot) -> str:
-    """``"P1: 270 P2: -90 P3: -50 P4: -130"``."""
-    return " ".join(f"{player_label(snapshot.group_id, seat)}: {snapshot.totals[seat]}" for seat in SEATS)
 
 
 def round_label(snapshot: RoomSnapshot) -> str:
@@ -273,7 +280,7 @@ def render_round_status(snapshot: RoomSnapshot) -> None:
 
 
 def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
-    """"Game over" heading, ``Group N | Group total T``, the results table and the totals footer."""
+    """"Game over" heading, ``Group N | Group total T`` and the results table."""
     if snapshot.phase is Phase.OVER:
         st.header("Game over", anchor=False)
     st.subheader(f"Group {snapshot.group_id} | Group total {snapshot.group_total}", anchor=False)
@@ -281,29 +288,33 @@ def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
 
 
 def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
-    """The results table (bonus rows tinted, ``title_seat``'s column highlighted) and totals footer."""
+    """The results table: bonus rows tinted, ``title_seat``'s column highlighted, the Total row last."""
     frame = results_frame(snapshot)
     if frame.empty:
         st.caption("No rounds revealed yet.")
-    else:
-        bonus_rows = {i for i, record in enumerate(snapshot.history) if record.multiplier > 1}
-        styler = frame.style.apply(
-            lambda row: [_BONUS_ROW_STYLE if row.name in bonus_rows else ""] * len(row), axis=1
-        )
-        if title_seat in SEATS:
-            styler = styler.map(lambda _: _OWN_COLUMN_STYLE, subset=[player_label(snapshot.group_id, title_seat)])
-        st.dataframe(
-            styler,
-            hide_index=True,
-            column_config={
-                # The narrowest widths that fit their contents, so a 375px phone shows every column
-                # (30 + 48 + 4 x 62 = 326px). On wider screens the grid shares out the extra space equally.
-                "RD": st.column_config.NumberColumn("RD", width=30),
-                "Total": st.column_config.NumberColumn("Total", width=48),
-                **{label: st.column_config.TextColumn(label, width=62) for label in frame.columns[2:]},
-            },
-        )
-    st.caption(totals_line(snapshot))
+        return
+    bonus_rows = {i for i, record in enumerate(snapshot.history) if record.multiplier > 1}
+    total_row = len(frame) - 1
+
+    def row_style(row: pd.Series) -> list[str]:
+        style = _TOTAL_ROW_STYLE if row.name == total_row else _BONUS_ROW_STYLE if row.name in bonus_rows else ""
+        return [style] * len(row)
+
+    styler = frame.style.apply(row_style, axis=1)
+    if title_seat in SEATS:
+        own = player_label(snapshot.group_id, title_seat)
+        styler = styler.map(lambda _: _OWN_COLUMN_STYLE, subset=pd.IndexSlice[: total_row - 1, [own]])
+    st.dataframe(
+        styler,
+        hide_index=True,
+        column_config={
+            # The narrowest widths that fit their contents, so a 375px phone shows every column
+            # (44 + 48 + 4 x 60 = 332px). On wider screens the grid shares out the extra space equally.
+            "RD": st.column_config.TextColumn("RD", width=44),
+            "Total": st.column_config.NumberColumn("Total", width=48),
+            **{label: st.column_config.TextColumn(label, width=60) for label in frame.columns[2:]},
+        },
+    )
 
 
 # -- join -----------------------------------------------------------------------------------------
