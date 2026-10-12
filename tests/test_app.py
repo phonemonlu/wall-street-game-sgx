@@ -133,6 +133,40 @@ def test_results_frame_only_covers_revealed_rounds():
     ]
 
 
+def test_results_key_is_the_revealed_cards():
+    reg, _ = screenshot_registry()
+    assert views.results_key(reg.snapshot(1)).split() == SCREENSHOT_GAME
+    fresh = RoomRegistry()
+    fresh.create_groups(1)
+    assert views.results_key(fresh.snapshot(1)) == ""
+
+
+def test_cached_tables_follow_the_game_not_just_the_round(monkeypatch: pytest.MonkeyPatch):
+    """Tables are replayed from a cache shared by every session: a new game with the same number of
+    rounds, another seat or another group must never get someone else's table."""
+    run()
+    reg = app_registry()
+    reg.create_groups(1)
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    play(reg, tokens, ["XYYY"])
+    at = run(seat=tokens["P1"])
+    assert at.dataframe[0].value.iloc[0]["P1"] == "X +30"
+
+    built: list[str] = []
+    real = views.results_frame
+    monkeypatch.setattr(views, "results_frame", lambda snap: built.append(views.results_key(snap)) or real(snap))
+    at.run()
+    assert built == []  # same game, same seat: replayed, not rebuilt
+    run(seat=tokens["P2"])
+    assert built == ["XYYY"]  # another seat highlights another column: its own table
+
+    reg.create_groups(1)  # a new game, also with one revealed round
+    tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
+    play(reg, tokens, ["YYYY"])
+    at = run(seat=tokens["P1"])
+    assert at.dataframe[0].value.iloc[0]["P1"] == "Y +10"
+
+
 def test_round_label_bonus_hint_and_countdown():
     reg = RoomRegistry()
     reg.create_groups(1)
@@ -302,14 +336,18 @@ def test_player_sees_all_groups_tab_with_every_board():
     at = run(seat=tokens[1]["P2"])
     assert not at.exception
     assert [t.label for t in at.tabs] == ["My group", "All groups"]
-    summary = at.dataframe[1].value  # [0] is my group's board
+    assert at.button(key="pick_X") and len(at.dataframe) == 1  # only the open tab is drawn: my board
+    at.session_state["player_tab"] = "All groups"  # what a tap on the tab does
+    at.run()
+    assert not at.button  # My group (with the X/Y buttons) is not drawn while hidden
+    summary = at.dataframe[0].value
     assert summary.to_dict("records") == [
         {"Group": 1, "Status": "Round 1 of 10", "Group total": 0},
         {"Group": 2, "Status": "Round 2 of 10", "Group total": 40},
         {"Group": 3, "Status": "Round 1 of 10", "Group total": 0},
     ]
     assert [e.label for e in at.expander] == ["Group 1 (your group)", "Group 2", "Group 3"]
-    boards = [df.value for df in at.dataframe[2:]]
+    boards = [df.value for df in at.dataframe[1:]]
     assert boards[0].to_dict("records") == [
         {"RD": "1", "Total": 0, "P1": "X +30", "P2": "Y -10", "P3": "Y -10", "P4": "Y -10"},
         {"RD": "Total", "Total": 0, "P1": "30", "P2": "-10", "P3": "-10", "P4": "-10"},
@@ -472,7 +510,7 @@ def test_host_group_controls_bots_and_global_actions():
     reg.create_groups(2)
     token = reg.join(1, "P1", "Ann")
     at.run()
-    assert at.button(key="Reveal_1").disabled and at.button(key="Next round_1").disabled
+    assert at.button(key="Reveal all_1").disabled and at.button(key="Next round_1").disabled
 
     assert at.selectbox(key="fill_strategy_1").options[:2] == ["Random", "Smart"]
     at.selectbox(key="fill_strategy_1").set_value("Smart")
@@ -481,18 +519,29 @@ def test_host_group_controls_bots_and_global_actions():
     at.button(key="all_Start all").click().run()
     assert any("skipped 1 group(s)" in text and "Nobody has joined group 2" in text for text in texts(at.info))
     assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.LOBBY
-    assert at.button(key="Reveal_1").disabled  # P1 has not chosen
+    assert at.button(key="Reveal all_1").disabled  # P1 has not chosen
     assert "Ann (human) · ⏳ pending" in texts(at.caption)
 
     at.selectbox(key="replace_strategy_1").set_value("Smart")
     at.button(key="replace_1").click().run()  # P1 is the only human seat
     with pytest.raises(UnknownSeat):
         reg.locate(token)
-    assert not at.button(key="Reveal_1").disabled
-    at.button(key="Reveal_1").click().run()
+    assert not at.button(key="Reveal all_1").disabled  # group 2 has nobody in it, so it does not count
+    at.button(key="Reveal all_1").click().run()
     assert reg.snapshot(1).phase is Phase.REVEALED
     assert at.dataframe  # the board
     assert "Group 1 | Group total 40" in texts(at.subheader)  # an all-smart group cooperates
+
+
+def test_host_draws_only_the_open_group_tab():
+    at = run_host()
+    app_registry().create_groups(2)
+    at.run()
+    assert [tab.label for tab in at.tabs] == ["Group 1", "Group 2", "Leaderboard"]
+    assert "Start_1" in button_keys(at) and "Start_2" not in button_keys(at)
+    at.session_state["host_tab"] = "Group 2"  # what a click on the tab does
+    at.run()
+    assert "Start_2" in button_keys(at) and "Start_1" not in button_keys(at)
 
 
 def test_host_bonus_prompt_starts_group_timer():
@@ -521,6 +570,10 @@ def test_host_many_groups_use_a_selectbox_and_leaderboard_exports():
     assert [tab.label for tab in at.tabs] == ["Groups", "Leaderboard"]
     at.selectbox(key="host_group").set_value(7).run()
     assert "Group 7 | Group total 0" in texts(at.subheader)
+    assert not at.get("download_button")  # the Leaderboard tab is not drawn until opened
+    at.session_state["host_tab"] = "Leaderboard"
+    at.run()
+    assert "Group 7 | Group total 0" not in texts(at.subheader)
     assert at.get("download_button")
 
 
@@ -579,19 +632,20 @@ def test_player_seat_handed_to_bot_shows_error():
     assert "no longer valid" in at.error[0].value
 
 
-def test_reveal_button_always_has_a_tooltip():
+def test_reveal_help_lists_what_every_group_is_waiting_for():
     reg = RoomRegistry()
-    reg.create_groups(1)
+    reg.create_groups(2)
     tokens = {seat: reg.join(1, seat, seat) for seat in SEATS}
-    assert views.reveal_help(reg.snapshot(1)) == "Start the game first."
-    reg.start(1)
+    reg.fill_with_bots(2, "Always Y")
+    assert views.reveal_help(reg.snapshots()) == "Group 1 has not started. Group 2 has not started."
+    reg.start_all()
     reg.submit(tokens["P1"], Card.X)
-    assert views.reveal_help(reg.snapshot(1)) == "Waiting for P2, P3, P4"
+    assert views.reveal_help(reg.snapshots()) == "Group 1 is still waiting for P2, P3, P4."
     for seat in ("P2", "P3", "P4"):
         reg.submit(tokens[seat], Card.Y)
-    assert views.reveal_help(reg.snapshot(1)) == "Everyone has chosen."
-    reg.reveal(1)
-    assert views.reveal_help(reg.snapshot(1)).startswith("This round is revealed")
+    assert views.reveal_help(reg.snapshots()) == "Every group has chosen: reveals them all at once."
+    reg.reveal_all()
+    assert views.reveal_help(reg.snapshots()) == "Group 1 has not opened round 2. Group 2 has not opened round 2."
 
 
 def test_bonus_prompt_hides_once_the_break_starts():

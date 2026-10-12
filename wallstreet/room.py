@@ -9,7 +9,8 @@ Locking rules:
 import secrets
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -279,6 +280,27 @@ def _strategy_factory(strategy_name: str) -> Callable[[], Strategy]:
     return factory
 
 
+def reveal_blockers(snapshots: Sequence[RoomSnapshot]) -> list[str]:
+    """Why every group cannot be revealed together yet ([] when Reveal may go ahead).
+
+    Every group in play must have an open round with every card in. Groups nobody has joined
+    (still in the lobby, all seats free) and finished groups are left out.
+    """
+    blockers = []
+    for snap in snapshots:
+        gid = snap.group_id
+        if snap.phase is Phase.LOBBY and any(not seat.is_free for seat in snap.seats):
+            blockers.append(f"Group {gid} has not started.")
+        elif snap.phase is Phase.REVEALED:
+            blockers.append(f"Group {gid} has not opened round {snap.round_no + 1}.")
+        elif snap.phase is Phase.OPEN and (pending := [s.label for s in snap.seats if not s.submitted]):
+            labels = ", ".join(player_label(gid, seat) for seat in pending)
+            blockers.append(f"Group {gid} is still waiting for {labels}.")
+    if not blockers and not any(snap.phase is Phase.OPEN for snap in snapshots):
+        blockers.append("There is no open round to reveal.")
+    return blockers
+
+
 def _ranked(rows: list[dict], key: str = "points") -> list[dict]:
     """Competition ranking (1, 1, 3) on already-sorted rows."""
     for i, row in enumerate(rows):
@@ -418,8 +440,19 @@ class RoomRegistry:
     def start_all(self) -> dict[int, str]:
         return self._apply_all(Room.start)
 
-    def reveal_all(self) -> dict[int, str]:
-        return self._apply_all(Room.reveal)
+    def reveal_all(self) -> list[RoundRecord]:
+        """Reveal every open group at once, or none: NotReady lists who is still missing.
+
+        Holds every room's lock (in group order, so two callers cannot deadlock) from the check to
+        the last reveal, so no group changes in between.
+        """
+        rooms = self._rooms()
+        with ExitStack() as stack:
+            for room in rooms:
+                stack.enter_context(room.lock)
+            if blockers := reveal_blockers([room.snapshot() for room in rooms]):
+                raise NotReady(" ".join(blockers))
+            return [room.reveal() for room in rooms if room.game.phase is Phase.OPEN]
 
     def next_all(self) -> dict[int, str]:
         return self._apply_all(Room.next_round)

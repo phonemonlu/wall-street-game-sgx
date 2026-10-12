@@ -19,7 +19,7 @@ from wallstreet.auth import HostSessions
 from wallstreet.config import Settings, check_login
 from wallstreet.errors import GameError, UnknownGroup, UnknownSeat
 from wallstreet.game import Phase
-from wallstreet.room import START_BOT, RoomRegistry, RoomSnapshot, SeatView
+from wallstreet.room import START_BOT, RoomRegistry, RoomSnapshot, SeatView, reveal_blockers
 from wallstreet.scoring import SEATS, Card, player_label
 from wallstreet.strategies import STRATEGIES
 
@@ -38,7 +38,12 @@ MAX_TABS = 8  # more groups than this: pick the group from a selectbox instead o
 DEFAULT_TIMER_SEC = 120
 JOIN_POLL_SEC = 2.0
 START_HELP = f"Empty seats become {START_BOT} bots. A group nobody has joined is not started."
-ALL_GROUPS_REFRESH_SEC = 3.0  # the All groups tab redraws every group's table, so refresh it less often
+# Views that draw many tables, and that nobody needs to the second, refresh less often.
+ALL_GROUPS_REFRESH_SEC = 5.0
+LEADERBOARD_REFRESH_SEC = 5.0
+# Finished results tables kept for replay (see _results_table): a few per group (one per seat, one
+# neutral) for the latest reveals, shared by every session.
+TABLE_CACHE_ENTRIES = 1000
 FLASH_SEC = 6.0
 
 _BIG_BUTTONS_CSS = """<style>
@@ -112,7 +117,7 @@ def round_label(snapshot: RoomSnapshot) -> str:
 def phase_text(phase: Phase) -> str:
     return {
         Phase.LOBBY: "Waiting for the host to start the game.",
-        Phase.OPEN: "Choose X or Y. You can change your mind until the host reveals.",
+        Phase.OPEN: "Choose X or Y. You can change your mind until the host reveals every group.",
         Phase.REVEALED: "Round revealed. Waiting for the host to open the next round.",
         Phase.OVER: "All rounds have been played.",
     }[phase]
@@ -149,16 +154,9 @@ def pending_seats(snapshot: RoomSnapshot) -> list[str]:
     return [player_label(snapshot.group_id, seat.label) for seat in snapshot.seats if not seat.submitted]
 
 
-def reveal_help(snapshot: RoomSnapshot) -> str:
-    """Tooltip for a group's Reveal button, for every phase."""
-    if waiting := pending_seats(snapshot):
-        return f"Waiting for {', '.join(waiting)}"
-    return {
-        Phase.LOBBY: "Start the game first.",
-        Phase.OPEN: "Everyone has chosen.",
-        Phase.REVEALED: "This round is revealed. Open the next round first.",
-        Phase.OVER: "The game is over.",
-    }[snapshot.phase]
+def reveal_help(snapshots: Sequence[RoomSnapshot]) -> str:
+    """Tooltip for the Reveal all button: what every group is still waiting for, or that all are in."""
+    return " ".join(reveal_blockers(snapshots)) or "Every group has chosen: reveals them all at once."
 
 
 def md_escape(text: str) -> str:
@@ -287,12 +285,28 @@ def render_board(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
     render_results(snapshot, title_seat)
 
 
+def results_key(snapshot: RoomSnapshot) -> str:
+    """Every revealed round's cards, e.g. ``"XYXX YYYY"``: with the group, all a results table shows."""
+    return " ".join("".join(str(record.choices[seat]) for seat in SEATS) for record in snapshot.history)
+
+
 def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> None:
     """The results table: bonus rows tinted, ``title_seat``'s column highlighted, the Total row last."""
-    frame = results_frame(snapshot)
-    if frame.empty:
+    if not snapshot.history:
         st.caption("No rounds revealed yet.")
         return
+    own_seat = title_seat if title_seat in SEATS else None
+    _results_table(results_key(snapshot), snapshot.group_id, own_seat, _snapshot=snapshot)
+
+
+@st.cache_data(max_entries=TABLE_CACHE_ENTRIES, show_spinner=False)
+def _results_table(cards: str, group_id: int, title_seat: str | None, _snapshot: RoomSnapshot) -> None:
+    """Draws the styled table. Cached on what it shows, so the refreshes of every session replay the
+    finished element instead of converting the pandas Styler again, the costliest part of a refresh.
+    (``_snapshot`` is left out of the cache key: ``cards`` and ``group_id`` already determine it.)
+    """
+    snapshot = _snapshot
+    frame = results_frame(snapshot)
     bonus_rows = {i for i, record in enumerate(snapshot.history) if record.multiplier > 1}
     total_row = len(frame) - 1
 
@@ -301,7 +315,7 @@ def render_results(snapshot: RoomSnapshot, title_seat: str | None = None) -> Non
         return [style] * len(row)
 
     styler = frame.style.apply(row_style, axis=1)
-    if title_seat in SEATS:
+    if title_seat is not None:
         own = player_label(snapshot.group_id, title_seat)
         styler = styler.map(lambda _: _OWN_COLUMN_STYLE, subset=pd.IndexSlice[: total_row - 1, [own]])
     st.dataframe(
@@ -396,12 +410,15 @@ def player_view(registry: RoomRegistry, settings: Settings, token: str) -> None:
     st.caption(f"Playing as **{md_escape(me.name)}**. Keep this URL: it is your seat.")
     st.html(_BIG_BUTTONS_CSS)
     if len(registry.group_ids()) > 1:
-        mine, everyone = st.tabs(["My group", "All groups"])
-        with mine:
-            _live(_player_live, settings)(registry, token, group_id, seat)
-        with everyone:
-            refresh = max(settings.refresh_sec, ALL_GROUPS_REFRESH_SEC)
-            st.fragment(_all_groups, run_every=refresh)(registry, group_id, seat)
+        # Only the open tab runs (and refreshes); switching tabs reruns the page.
+        mine, everyone = st.tabs(["My group", "All groups"], key="player_tab", on_change="rerun")
+        if mine.open:
+            with mine:
+                _live(_player_live, settings)(registry, token, group_id, seat)
+        if everyone.open:
+            with everyone:
+                refresh = max(settings.refresh_sec, ALL_GROUPS_REFRESH_SEC)
+                st.fragment(_all_groups, run_every=refresh)(registry, group_id, seat)
     else:
         _live(_player_live, settings)(registry, token, group_id, seat)
 
@@ -462,7 +479,7 @@ def _player_live(registry: RoomRegistry, token: str, group_id: int, seat: str) -
         if waiting := pending_seats(snapshot):
             st.caption(f"Waiting for: {', '.join(waiting)}")
         elif snapshot.phase is Phase.OPEN:
-            st.caption("Everyone has chosen. Waiting for the host to reveal.")
+            st.caption("Everyone in your group has chosen. The host reveals once every group is done.")
         is_open = snapshot.phase is Phase.OPEN
         # A horizontal container (unlike st.columns) keeps X and Y side by side on phones too.
         row = st.container(horizontal=True)
@@ -595,11 +612,19 @@ def _create_groups(registry: RoomRegistry) -> None:
 def _global_controls(registry: RoomRegistry) -> None:
     with st.container(border=True):
         st.markdown("**All groups**")
+        def report(label: str) -> Callable[[dict[int, str]], str]:
+            return lambda skipped: skipped_text(label, skipped)
+
         cols = st.columns(3)
-        for col, (label, action, help_text) in zip(
+        for col, (label, action, help_text, done) in zip(
             cols,
-            (("Start all", registry.start_all, START_HELP), ("Reveal all", registry.reveal_all, None),
-             ("Next round all", registry.next_all, None)),
+            (
+                ("Start all", registry.start_all, START_HELP, report("Start all")),
+                # All or nothing: an error lists every group still waiting (this box does not refresh
+                # by itself, so the button stays clickable rather than showing a stale state).
+                ("Reveal all", registry.reveal_all, "Reveals every group at once, once every group has chosen.", None),
+                ("Next round all", registry.next_all, None, report("Next round all")),
+            ),
             strict=True,
         ):
             col.button(
@@ -609,7 +634,7 @@ def _global_controls(registry: RoomRegistry) -> None:
                 width="stretch",
                 on_click=_act,
                 args=("all", action),
-                kwargs={"done": lambda skipped, label=label: skipped_text(label, skipped)},
+                kwargs={"done": done},
             )
         secs_col, start_col, clear_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         secs_col.number_input(
@@ -625,19 +650,23 @@ def _global_controls(registry: RoomRegistry) -> None:
 
 
 def _groups_area(registry: RoomRegistry, settings: Settings, group_ids: list[int]) -> None:
+    # Only the open tab runs (and refreshes): hidden group panels would otherwise refresh every second.
     if len(group_ids) <= MAX_TABS:
-        tabs = st.tabs([f"Group {gid}" for gid in group_ids] + ["Leaderboard"])
+        tabs = st.tabs([f"Group {gid}" for gid in group_ids] + ["Leaderboard"], key="host_tab", on_change="rerun")
         for tab, gid in zip(tabs, group_ids):
-            with tab:
-                _live(_group_panel, settings)(registry, gid)
+            if tab.open:
+                with tab:
+                    _live(_group_panel, settings)(registry, gid)
     else:
-        tabs = st.tabs(["Groups", "Leaderboard"])
-        with tabs[0]:
-            _live(_overview, settings)(registry)
-            gid = st.selectbox("Group", group_ids, key="host_group", format_func=lambda g: f"Group {g}")
-            _live(_group_panel, settings)(registry, gid)
-    with tabs[-1]:
-        _live(_leaderboard, settings)(registry)
+        tabs = st.tabs(["Groups", "Leaderboard"], key="host_tab", on_change="rerun")
+        if tabs[0].open:
+            with tabs[0]:
+                _live(_overview, settings)(registry)
+                gid = st.selectbox("Group", group_ids, key="host_group", format_func=lambda g: f"Group {g}")
+                _live(_group_panel, settings)(registry, gid)
+    if tabs[-1].open:
+        with tabs[-1]:
+            st.fragment(_leaderboard, run_every=max(settings.refresh_sec, LEADERBOARD_REFRESH_SEC))(registry)
 
 
 def _overview(registry: RoomRegistry) -> None:
@@ -657,21 +686,22 @@ def _group_panel(registry: RoomRegistry, gid: int) -> None:
             st.markdown(f"**{player_label(gid, seat.label)}**{' 🤖' if seat.is_bot else ''}")
             st.caption(seat_status(seat, phase))
 
-    waiting = pending_seats(snap)
+    snapshots = registry.snapshots()
     cols = st.columns(3)
-    for col, (label, action, enabled, help_text) in zip(
+    for col, (label, action, args, enabled, help_text) in zip(
         cols,
         (
-            ("Start", registry.start, phase is Phase.LOBBY, START_HELP),
-            # Reveal always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
-            ("Reveal", registry.reveal, phase is Phase.OPEN and not waiting, reveal_help(snap)),
-            ("Next round", registry.next_round, phase is Phase.REVEALED, None),
+            ("Start", registry.start, (gid,), phase is Phase.LOBBY, START_HELP),
+            # Reveal is for every group at once, so it waits for all of them.
+            # It always has a tooltip: a button whose tooltip comes and goes is briefly drawn twice.
+            ("Reveal all", registry.reveal_all, (), not reveal_blockers(snapshots), reveal_help(snapshots)),
+            ("Next round", registry.next_round, (gid,), phase is Phase.REVEALED, None),
         ),
         strict=True,
     ):
         col.button(
             label, key=f"{label}_{gid}", type="primary" if enabled else "secondary", disabled=not enabled,
-            help=help_text, width="stretch", on_click=_act, args=(f"g{gid}", action, gid),
+            help=help_text, width="stretch", on_click=_act, args=(f"g{gid}", action, *args),
         )
 
     secs = _Widget(f"timer_secs_{gid}", DEFAULT_TIMER_SEC)
@@ -742,7 +772,7 @@ def _leaderboard(registry: RoomRegistry) -> None:
         st.dataframe(groups, hide_index=True)
     st.download_button(
         "Download results (JSON)",
-        data=json.dumps(registry.export(), indent=2),
+        data=lambda: json.dumps(registry.export(), indent=2),  # built on click, not on every refresh
         file_name="wall-street-game-results.json",
         mime="application/json",
         key="download_results",

@@ -12,7 +12,7 @@ from wallstreet.errors import (
     UnknownSeat,
 )
 from wallstreet.game import Game, Phase
-from wallstreet.room import Room, RoomRegistry, Seat
+from wallstreet.room import Room, RoomRegistry, Seat, reveal_blockers
 from wallstreet.scoring import SEATS, Card
 from wallstreet.strategies import STRATEGIES, RandomStrategy, SmartBot
 
@@ -574,29 +574,61 @@ def test_messages_use_numbering_across_groups(reg: RoomRegistry):
         reg.reveal(2)
 
 
-def test_start_reveal_next_all_report_skipped(reg: RoomRegistry):
+def test_start_and_next_all_report_skipped_groups(reg: RoomRegistry):
     reg.fill_with_bots(1, "Always Y")
     reg.fill_with_bots(2, "Always X")
     skipped = reg.start_all()
     assert list(skipped) == [3] and "Nobody has joined group 3" in skipped[3]
     assert reg.snapshot(1).phase is Phase.OPEN and reg.snapshot(2).phase is Phase.OPEN
-    skipped = reg.reveal_all()
-    assert list(skipped) == [3]
+    records = reg.reveal_all()  # group 3 has nobody in it, so it does not hold up the others
+    assert [record.round_no for record in records] == [1, 1]
     assert reg.snapshot(1).totals["P1"] == 10 and reg.snapshot(2).totals["P1"] == -10
     skipped = reg.next_all()
     assert list(skipped) == [3]
     assert reg.snapshot(1).round_no == 2
 
 
-def test_reveal_all_skips_pending(reg: RoomRegistry):
-    tokens = join_all(reg, 1)
-    reg.fill_with_bots(2, "Always Y")
+def test_reveal_all_waits_for_every_player_in_every_group(reg: RoomRegistry):
+    tokens = join_all(reg, 2)
+    reg.fill_with_bots(1, "Always Y")
     reg.fill_with_bots(3, "Always Y")
     assert reg.start_all() == {}
-    skipped = reg.reveal_all()
-    assert list(skipped) == [1] and "P1" in skipped[1]
     reg.submit(tokens["P1"], X)
-    assert reg.my_choice(tokens["P1"]) is X
+    with pytest.raises(NotReady, match=r"^Group 2 is still waiting for P6, P7, P8\.$"):
+        reg.reveal_all()
+    assert all(snap.phase is Phase.OPEN and not snap.history for snap in reg.snapshots())  # nothing revealed
+    assert reg.my_choice(tokens["P1"]) is X  # cards stay in and can still change
+    submit_all(reg, tokens, "XYYY")
+    records = reg.reveal_all()
+    assert len(records) == 3
+    assert all(snap.phase is Phase.REVEALED for snap in reg.snapshots())
+    assert dict(reg.snapshot(2).history[0].choices) == {"P1": X, "P2": Y, "P3": Y, "P4": Y}
+
+
+def test_reveal_blockers_name_every_group_that_is_not_ready(reg: RoomRegistry):
+    assert reveal_blockers(reg.snapshots()) == ["There is no open round to reveal."]
+    reg.fill_with_bots(1, "Always Y")
+    reg.fill_with_bots(2, "Always Y")
+    reg.join(3, "P1", "Ann")
+    reg.start(1)
+    reg.start(2)
+    reg.reveal(2)  # group 2 is one step ahead
+    assert reveal_blockers(reg.snapshots()) == ["Group 2 has not opened round 2.", "Group 3 has not started."]
+    with pytest.raises(NotReady, match="Group 2 has not opened round 2. Group 3 has not started."):
+        reg.reveal_all()
+    assert reg.snapshot(1).phase is Phase.OPEN
+
+
+def test_reveal_all_skips_finished_groups_and_errors_when_nothing_is_open():
+    reg = RoomRegistry(rounds=1)
+    reg.create_groups(2)
+    reg.fill_with_bots(1, "Always Y")
+    reg.fill_with_bots(2, "Always Y")
+    reg.start_all()
+    reg.reveal(1)  # group 1 has finished its only round
+    assert [record.round_no for record in reg.reveal_all()] == [1]  # only group 2 was open
+    with pytest.raises(NotReady, match="There is no open round to reveal."):
+        reg.reveal_all()
 
 
 # -- timer --------------------------------------------------------------------------------------

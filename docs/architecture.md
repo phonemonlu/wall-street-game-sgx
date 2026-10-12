@@ -162,8 +162,11 @@ class RoomRegistry:
     def my_choice(self, token: str) -> Card | None
     def reveal(self, group_id: int) -> RoundRecord
     def next_round(self, group_id: int) -> None
-    def start_all(self) / reveal_all(self) / next_all(self) -> dict[int, str]
+    def start_all(self) / next_all(self) -> dict[int, str]
         # apply to every group; returns {group_id: reason} for SKIPPED groups (str of the GameError)
+    def reveal_all(self) -> list[RoundRecord]
+        # all or nothing, under every room lock: NotReady (from reveal_blockers) unless every group in
+        # play has an open round with every card in; empty lobby groups and finished groups are left out
     def start_timer(self, seconds: int, group_id: int | None = None) -> None  # None = all groups
     def clear_timer(self, group_id: int | None = None) -> None
     def leaderboard(self) -> list[dict]   # rows: {"rank","group","seat","name","bot","points"} sorted desc
@@ -199,7 +202,8 @@ def check_login(settings: Settings, username: str, password: str) -> bool   # hm
     group's seats as buttons; tapping a free one calls `RoomRegistry.take_seat` (no name yet) and
     puts the token in `?seat=`. An unnamed seat shows only the name step (`RoomRegistry.rename`,
     plus **Pick another seat** in the lobby). Renaming: lobby only, or any time while unnamed.
-    With more than one group the player view has **My group** / **All groups** tabs; All groups
+    With more than one group the player view has **My group** / **All groups** tabs (lazy: only
+    the open tab runs); All groups
     is a fragment refreshing every `max(refresh_sec, ALL_GROUPS_REFRESH_SEC)` that shows the
     overview (Group, Status, Group total) and, per group, `seats_line` + `render_results`.
   * `/login` (`login.py` → `views.login_page`): username/password form. On success
@@ -217,15 +221,22 @@ def check_login(settings: Settings, username: str, password: str) -> bool   # hm
   P1-P4, Group 2 is P5-P8, ... (UI, leaderboard rows and the JSON export). Internally every group
   keeps `SEATS` = P1-P4 for scoring, bots, tokens and widget keys.
 * Results table columns `RD | Total | P1 | P2 | P3 | P4` (Group 2: `P5..P8`); cells `"X +10"` / `"Y -30"`; Total = round group total.
-  Footer: `P1: 270 P2: -90 P3: -50 P4: -130`. Header `Group N | Group total T`.
-* Live parts use `@st.fragment(run_every=settings.refresh_sec)`.
+  Last row `Total` with each player's score. Header `Group N | Group total T`.
+* Live parts use `@st.fragment(run_every=settings.refresh_sec)`; the All groups tab and the
+  Leaderboard use `max(refresh_sec, 5)`.
+* Refresh cost: converting the styled (pandas Styler) table is the costliest part of a rerun, so
+  `render_results` draws it through `_results_table`, an `st.cache_data` function keyed on
+  `(results_key(snapshot), group_id, title_seat)` (`results_key` = the revealed cards, e.g. `"XYXX YYYY"`).
+  On a hit Streamlit replays the stored element without running the function, for every session.
+  Tabs (`st.tabs(..., key=..., on_change="rerun")`) are lazy: only the open tab's fragment runs.
 * `views.py` keeps logic in pure helpers that never touch streamlit and are unit-tested directly:
-  `results_frame(snapshot) -> DataFrame` (revealed rounds only), `totals_line(snapshot) -> str`,
+  `results_frame(snapshot) -> DataFrame` (revealed rounds + Total row), `results_key(snapshot) -> str`,
   `round_label`, `bonus_hint`, `seconds_left`, `countdown_text`, `pending_seats`, `seat_status`.
   Render functions: `render_banner(settings)`, `render_round_status(snapshot)`,
-  `render_board(snapshot, title_seat)` ("Game over" heading, `Group N | Group total T`, table,
-  footer), `join_view(registry)`, `player_view(registry, settings, token)`,
+  `render_board(snapshot, title_seat)` ("Game over" heading, `Group N | Group total T`, table),
+  `join_view(registry)`, `player_view(registry, settings, token)`,
   `host_view(registry, settings)`.
-* Host per-group panels are tabs (≤ 8 groups) or a selectbox with an overview table (> 8 groups).
+* Host per-group panels are lazy tabs (≤ 8 groups; key `host_tab`) or a selectbox with an overview
+  table (> 8 groups).
   Widget callbacks read widget values from `st.session_state` when they fire, so a value changed in
   the same interaction as a click is never stale.

@@ -86,8 +86,9 @@ link on your phone), where you enter your name. Play from that tab; run the game
    name (or, before naming, pick another seat) until the game starts. The host can fill empty
    seats with bots.
 3. Host: **Start** each group, or **Start all**. Seats still empty at that moment become Random
-   bots; a group nobody has joined stays in the lobby. In every round, **Reveal** becomes
-   available once all four seats have chosen. Then click **Next round**.
+   bots; a group nobody has joined stays in the lobby. In every round, **Reveal all** becomes
+   available once every player in every group has chosen, and reveals all groups at once
+   (its tooltip lists who is still missing). Then click **Next round**.
 4. With more than one group, players get **My group** and **All groups** tabs. **All groups**
    shows every group's revealed rounds: each player's card and points, and the group total.
    Unrevealed cards are never shown.
@@ -176,9 +177,11 @@ docker compose --profile loadtest run --rm stress
   games.
 * **A restart loses every game.** Before stopping or redeploying the server, use **Download results
   (JSON)** on the Leaderboard tab.
-* Load grows with the number of open tabs, not the number of groups. Every open tab reruns its live
-  fragment every `WSG_REFRESH_SEC` seconds, so raise that value for very large sessions. The stress
-  test above measures the registry alone, without Streamlit.
+* Load grows with the number of open browser tabs, not the number of groups. Every open page reruns
+  its live part every `WSG_REFRESH_SEC` seconds, so raise that value for very large sessions. To keep
+  each rerun cheap, only the selected tab of a page is drawn and refreshed, the All groups tab and the
+  Leaderboard refresh every 5 seconds, and finished results tables are cached and shared by every
+  session until the next reveal. The stress test above measures the registry alone, without Streamlit.
 
 ## Troubleshooting
 
